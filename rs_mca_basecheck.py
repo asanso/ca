@@ -127,9 +127,9 @@ def gen_instance(xs, p, k, ell, mode="noisy_codewords", err_frac=0.45):
             for i in flips:
                 y[i] = (y[i] + 1 + random.randrange(p-1)) % p
             fs.append(y)
-            return fs
+        return fs  # <-- fix: return AFTER the loop
     if mode != "patchwork":
-        raise ValueError("use mode='patchwork'")
+        raise ValueError("use mode='patchwork' or 'noisy_codewords'")
     for _ in range(ell):
         cA = eval_poly_vector(rand_poly(k, p), xs, p)
         cB = eval_poly_vector(rand_poly(k, p), xs, p)
@@ -248,7 +248,9 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
         delta: Optional[float] = None,
         c1: float = 1.0, c2: float = 1.0,
         alphas: Optional[List[int]] = None,
-        seed: Optional[int] = None):
+        seed: Optional[int] = None,
+        mode: str = "noisy_codewords",
+        err_frac: float = 0.45):
 
     if seed is not None:
         random.seed(seed)
@@ -279,7 +281,7 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
     tested_after_base = 0
 
     for _ in range(tries):
-        fs = gen_instance(xs, p, k, ell, "noisy_codewords")
+        fs = gen_instance(xs, p, k, ell, mode=mode, err_frac=err_frac)
 
         base_ok, base_records = check_base_closeness(fs, xs, k, p, s)
         if not base_ok:
@@ -319,7 +321,8 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
                 "params": {
                     "p": p, "n": n, "k": k, "ell": ell,
                     "rho": rho, "delta": delta, "s": s,
-                    "err": err, "beta": beta, "c1": c1, "c2": c2
+                    "err": err, "beta": beta, "c1": c1, "c2": c2,
+                    "mode": mode, "err_frac": err_frac
                 },
                 "domain": xs,
                 "fs": fs,
@@ -350,7 +353,8 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
     params = {
         "p": p, "n": n, "k": k, "ell": ell,
         "rho": rho, "delta": delta, "s": s,
-        "err": err, "beta": beta, "c1": c1, "c2": c2
+        "err": err, "beta": beta, "c1": c1, "c2": c2,
+        "mode": mode, "err_frac": err_frac
     }
     out = {"params": params}
 
@@ -381,10 +385,40 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
 
 # ---------------- CLI ----------------
 
+def _parse_alphas(arg: Optional[str], p: int) -> Optional[List[int]]:
+    """
+    --alphas parsing:
+      * Comma-separated list: "0,3,5"
+      * Single integer N: use list(range(N))
+      * Omitted/None: return None (caller will default to 0..p-1)
+    """
+    if arg is None:
+        return None
+    s = arg.strip()
+    if "," in s:
+        vals = []
+        for tok in s.split(","):
+            tok = tok.strip()
+            if tok == "": continue
+            vals.append(int(tok) % p)
+        # dedupe but preserve order
+        seen = set(); out = []
+        for v in vals:
+            if v not in seen:
+                seen.add(v); out.append(v)
+        return out
+    # single integer
+    N = int(s)
+    if N <= 0:
+        return []
+    if N > p:
+        N = p
+    return list(range(N))
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--p", type=int, default=79)
+    ap.add_argument("--p", type=int, default=13)
     ap.add_argument("--n", type=int, default=6)
     ap.add_argument("--k", type=int, default=2)
     ap.add_argument("--ell", type=int, default=2)
@@ -397,8 +431,22 @@ if __name__ == "__main__":
                     help="Constant for err = c2 * (k n^2)/|F| in the Johnson regime.")
     ap.add_argument("--seed", type=int, default=None,
                     help="Random seed for reproducibility.")
+    # NEW CLI flags
+    ap.add_argument("--mode", type=str, default="noisy_codewords",
+                    choices=["noisy_codewords", "patchwork"],
+                    help="Instance generation mode.")
+    ap.add_argument("--err-frac", type=float, default=0.45,
+                    help="Error fraction for 'noisy_codewords' mode.")
+    ap.add_argument("--alphas", type=str, default=None,
+                    help="Comma list like '0,3,5' or a single integer N meaning alphas=0..N-1.")
+
     args = ap.parse_args()
+
+    # Parse/normalize alphas
+    parsed_alphas = _parse_alphas(args.alphas, args.p)
 
     run(p=args.p, n=args.n, k=args.k, ell=args.ell,
         tries=args.tries, delta=args.delta,
-        c1=args.c1, c2=args.c2, seed=args.seed)
+        c1=args.c1, c2=args.c2, seed=args.seed,
+        alphas=parsed_alphas,
+        mode=args.mode, err_frac=args.err_frac)
