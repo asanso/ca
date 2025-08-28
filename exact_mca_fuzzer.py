@@ -9,10 +9,10 @@ Exact MCA fuzzer (small n) for Reed-Solomon over GF(p) with ROOT-OF-UNITY domain
     * "sequential": {1,2,...,n}
     * "random": n distinct elements from {1,...,p-1}
 
-- Correlated check: for a list of alphas, check if ≥ beta fraction decode to agreement ≥ s.
-- Mutual check: search for a single witness set S (via base T of size k) of size ≥ s for all f_j.
-
-If a candidate (correlated holds, mutual fails) is found, it saves to mca_counterexample_root.json.
+- Correlated check (strict): for ≥ beta fraction of alphas, there exists a witness set S
+  of size ≥ s_threshold where f*_α agrees with some RS codeword.
+- Mutual check: search for a single witness set S of size ≥ s_threshold where
+  each f_j agrees with some (possibly different) RS codeword.
 """
 import argparse, json, math, random
 from itertools import combinations
@@ -47,10 +47,6 @@ def poly_scale(a, s, p):
     return [(ai*s) % p for ai in a]
 
 def interpolate_lagrange(xs, ys, k, p):
-    """
-    Coeffs of the unique degree<k polynomial over GF(p) interpolating k points.
-    Returned in power basis: c0 + c1 x + ... + c_{k-1} x^{k-1}.
-    """
     coeffs = [0]*k
     for i in range(k):
         xi, yi = xs[i] % p, ys[i] % p
@@ -58,10 +54,10 @@ def interpolate_lagrange(xs, ys, k, p):
         denom = 1
         for m in range(k):
             if m == i: continue
-            num = poly_mul(num, [(-xs[m]) % p, 1], p)   # (x - x_m)
+            num = poly_mul(num, [(-xs[m]) % p, 1], p)
             denom = (denom * ((xi - xs[m]) % p)) % p
         inv_denom = pow(denom, p-2, p)
-        li = poly_scale(num, (yi*inv_denom) % p, p)     # yi * L_i(x)
+        li = poly_scale(num, (yi*inv_denom) % p, p)
         coeffs = poly_add(coeffs, li, p)
     coeffs = (coeffs + [0]*k)[:k]
     return coeffs
@@ -75,13 +71,12 @@ def factorize(n: int):
         while m % d == 0:
             fac[d] = fac.get(d, 0) + 1
             m //= d
-        d += 1 if d == 2 else 2  # skip evens after 2
+        d += 1 if d == 2 else 2
     if m > 1:
         fac[m] = fac.get(m, 0) + 1
     return fac
 
 def primitive_root(p: int) -> int:
-    """Return a primitive root g of GF(p), i.e., generator of F_p^* of order p-1."""
     if p == 2:
         return 1
     phi = p - 1
@@ -93,21 +88,15 @@ def primitive_root(p: int) -> int:
                 ok = False; break
         if ok:
             return g
-    raise RuntimeError("failed to find primitive root (should not happen for prime p)")
+    raise RuntimeError("failed to find primitive root")
 
 def root_of_unity_domain(p: int, n: int):
-    """Return domain [ω^0, ω^1, ..., ω^{n-1}] where ω has exact order n. Requires n | p-1."""
     if (p - 1) % n != 0:
-        raise ValueError(f"n={n} does not divide p-1={p-1}; cannot build size-n subgroup.")
-    g = primitive_root(p)                  # order p-1
-    omega = pow(g, (p - 1) // n, p)        # has order dividing n
-    # ensure exact order n
+        raise ValueError(f"n={n} does not divide p-1={p-1}")
+    g = primitive_root(p)
+    omega = pow(g, (p - 1) // n, p)
     if pow(omega, n, p) != 1:
-        raise RuntimeError("constructed omega does not satisfy omega^n=1")
-    # check no smaller divisor
-    for d in range(1, n):
-        if n % d == 0 and pow(omega, d, p) == 1:
-            raise RuntimeError("omega order < n (unexpected)")
+        raise RuntimeError("omega^n != 1")
     xs = [1]
     for i in range(1, n):
         xs.append((xs[-1] * omega) % p)
@@ -125,7 +114,7 @@ def build_domain(p: int, n: int, kind: str, seed: Optional[int] = None):
         rnd = random.Random(seed)
         return rnd.sample(range(1, p), n)
     else:
-        raise ValueError("domain kind must be one of: root, sequential, random")
+        raise ValueError("bad domain kind")
 
 # ------------------------------- Generators ----------------------------------
 def rand_poly(k: int, p: int) -> List[int]:
@@ -174,32 +163,44 @@ def gen_linear_combo(fs: List[List[int]], alpha: int, p: int) -> List[int]:
         out[i] = s
     return out
 
-def best_agreement_exact(y: List[int], xs: List[int], k: int, p: int) -> int:
+def best_agreement_exact(y: List[int], xs: List[int], k: int, p: int):
+    """
+    Return (max_agree, witness_S) where witness_S is a set of coordinates
+    on which y agrees with some RS codeword.
+    """
     n = len(xs)
-    best = -1
+    best = -1; best_S = None
     for T in combinations(range(n), k):
         xT = [xs[i] for i in T]; yT = [y[i] for i in T]
         coeffs = interpolate_lagrange(xT, yT, k, p)
         cw = eval_poly_vector(coeffs, xs, p)
-        agree = sum(int(cw[i] == y[i]) for i in range(n))
-        if agree > best:
-            best = agree
+        S = [i for i in range(n) if cw[i] == y[i]]
+        if len(S) > best:
+            best = len(S); best_S = S
             if best == n: break
-    return best
+    return best, best_S
 
-def correlated_agreement_holds(xs, fs, k, p, alpha_list, s_threshold, beta=0.5):
-    ok = 0; records = []
+def strict_correlated_agreement(xs, fs, k, p, alpha_list, s_threshold, beta=0.5):
+    """
+    Strict CA: For ≥ beta fraction of alphas, there exists a witness set S of size ≥ s_threshold.
+    """
+    ok = 0; records = []; witness_sets = []
     for a in alpha_list:
         combo = gen_linear_combo(fs, a, p)
-        agree = best_agreement_exact(combo, xs, k, p)
-        records.append((a, agree))
+        agree, S = best_agreement_exact(combo, xs, k, p)
+        records.append({"alpha": a, "agree": agree, "S": S})
         if agree >= s_threshold:
             ok += 1
-    return (ok >= math.ceil(beta * len(alpha_list))), ok, records
+            witness_sets.append(set(S))
+    return (ok >= math.ceil(beta * len(alpha_list))), ok, records, witness_sets
 
 def mutual_agreement_max_witness(xs: List[int], fs: List[List[int]], k: int, p: int):
+    """
+    MCA: Find max size of a set S such that for each f_j there exists some RS codeword c_j
+    with f_j(x) = c_j(x) for all x in S. S is common, but c_j may differ.
+    """
     n = len(xs); ell = len(fs)
-    best = -1; best_T = None
+    best = -1; best_S = None
     for T in combinations(range(n), k):
         xT = [xs[i] for i in T]
         coeffs_list = []
@@ -213,11 +214,11 @@ def mutual_agreement_max_witness(xs: List[int], fs: List[List[int]], k: int, p: 
             for i in range(n):
                 if match[i] and cw[i] != fs[j][i]:
                     match[i] = False
-        size = sum(match)
-        if size > best:
-            best = size; best_T = T
+        S = [i for i in range(n) if match[i]]
+        if len(S) > best:
+            best = len(S); best_S = S
             if best == n: break
-    return best, best_T
+    return best, best_S
 
 # ---------------------------------- Runner -----------------------------------
 def run_fuzz_root(
@@ -238,15 +239,16 @@ def run_fuzz_root(
 
     xs = build_domain(p, n, domain, seed=seed)
 
-    # Preselect alphas (0 is allowed; we just sample)
+    print("domain is ", xs)
+
     all_alphas = list(range(p))
     random.shuffle(all_alphas)
     alpha_list = all_alphas[:alphas_per_field]
 
     for t in range(tries):
         fs = gen_instance(xs, p=p, k=k, ell=ell, mode=mode, err_frac=err_frac)
-        holds, good, recs = correlated_agreement_holds(xs, fs, k, p, alpha_list, s_threshold, beta)
-        mut_size, mut_T = mutual_agreement_max_witness(xs, fs, k, p)
+        holds, good, recs, wsets = strict_correlated_agreement(xs, fs, k, p, alpha_list, s_threshold, beta)
+        mut_size, mut_S = mutual_agreement_max_witness(xs, fs, k, p)
 
         if holds and mut_size < s_threshold:
             info = {
@@ -255,12 +257,12 @@ def run_fuzz_root(
                 "beta": beta, "alphas": alpha_list,
                 "s_threshold": s_threshold,
                 "cor_records": recs,
-                "mutual_exact": {"size": mut_size, "T": mut_T},
+                "mutual_exact": {"size": mut_size, "S": mut_S},
                 "seed": seed, "try_index": t
             }
             with open(outfile, "w") as f:
                 json.dump({"params": info, "xs": xs, "fs": fs}, f, indent=2)
-            print("Found CANDIDATE (exact) on domain=", domain, "Saved to", outfile)
+            print("Found CANDIDATE (CA holds, MCA fails) on domain=", domain, "Saved to", outfile)
             print(json.dumps(info, indent=2))
             return True, outfile, info
 
