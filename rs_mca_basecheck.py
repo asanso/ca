@@ -3,28 +3,25 @@
 """
 RS CA/MCA fuzzer with base closeness enforcement (root-of-unity domain).
 
-Theorem mapping (BCIKS'20, Thm. 6.2):
+Theorem mapping (BCIKS'20, Thm. 6.2), in this script's convention (deg < k ⇒ dim=k, ρ=k/n):
   If Pr_r[ u^(r) is δ-close ] > err  ⇒ every base u_j is δ-close.
-  We therefore test the strict condition:
-      (# of δ-close combos among tested alphas) / (# alphas)  >  err
-  implemented as:
-      CA_ok  ⇔  CA_good ≥ floor(err * total) + 1.
 
-Regimes for err (clamped to [0,1], with |F|=p):
-      err = c1 * (k n)/p     for 0 < δ < (1-ρ)/2
-      err = c2 * (k n^2)/p   for (1-ρ)/2 < δ < 1 - 1.01*sqrt(ρ)
+We test δ-closeness via agreement threshold:
+    s = ceil((1 - δ) * n), i.e., "δ-close" ⇔ agreement ≥ s.
 
-Conventions:
-  - RS uses polynomials of degree < k (so dimension = k, rate ρ = k/n).
-  - Agreement threshold: s = ceil((1 - δ) n).
-  - We *enforce base closeness*: trials where any base f_j has agreement < s
-    are skipped (CA/MCA not even attempted).
-  - Counterexample condition: base_closeness holds, strict-CA holds (per err),
-    but MCA witness size < s.
+err is modeled by the two regimes (clamped to [0,1], |F| = p):
+  - 0 < δ < (1-ρ)/2         : err = c1 * (k n)/p
+  - (1-ρ)/2 < δ < 1-1.01√ρ  : err = c2 * (k n^2)/p
+
+CA decision (strict theorem form, no extra knobs):
+  CA_ok  ⇔  #good  ≥  floor(err * total) + 1
+(We also report has_witness = (#good ≥ 1), but it does NOT affect CA_ok.)
+
+Counterexample condition (printed & returned):
+  base_closeness holds, CA_ok is True (strict), but MCA witness size < s.
 
 Defaults (toy):
-  p=79, n=6, k=2, ell=2, tries=50, delta auto (just inside Johnson), seed=None
-  c1=c2=1.0
+  p=79, n=6, k=2, ell=2, tries=50, delta auto (just inside Johnson), seed=None, c1=c2=1.0
 """
 
 import itertools, math, random, json
@@ -264,7 +261,7 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
 
     s = math.ceil((1 - delta) * n)
 
-    # err per theorem (no beta nonsense)
+    # err per theorem (strict form)
     err = compute_err(p, n, k, delta, rho, c1, c2)
 
     if alphas is None:
@@ -292,16 +289,19 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
             xs, fs, k, p, alphas, s
         )
 
-        # strict theorem requirement: Pr[u^(r) δ-close] > err  ⇒ strict '>'
+        # strict theorem requirement: Pr[u^(r) δ-close] > err ⇒ strict '>'
         passes_needed_err = int(math.floor(err * CA_total)) + 1
         CA_ok = (CA_good >= passes_needed_err)
+        has_witness = (CA_good >= 1)
 
         last_CA_summary = {
+            "ok": CA_ok,
             "good": CA_good,
             "total": CA_total,
             "frac": CA_frac,
             "passes_needed_err_strict": passes_needed_err,
-            "meets_err_requirement": CA_ok
+            "meets_err_requirement": CA_ok,
+            "has_witness": has_witness
         }
 
         MCA_size, MCA_S = mutual_agreement(xs, fs, k, p)
@@ -324,6 +324,7 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
                     "frac": CA_frac,
                     "passes_needed_err_strict": passes_needed_err,
                     "meets_err_requirement": CA_ok,
+                    "has_witness": has_witness,
                     "records": CA_records
                 },
                 "MCA": {"size": MCA_size, "S": MCA_S},
@@ -419,7 +420,7 @@ if __name__ == "__main__":
                     help="Constant for err = c2 * (k n^2)/|F| in the Johnson regime.")
     ap.add_argument("--seed", type=int, default=None,
                     help="Random seed for reproducibility.")
-    # CLI flags
+    # Existing CLI flags
     ap.add_argument("--mode", type=str, default="noisy_codewords",
                     choices=["noisy_codewords", "patchwork"],
                     help="Instance generation mode.")
