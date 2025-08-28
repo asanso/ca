@@ -5,9 +5,12 @@ RS CA/MCA fuzzer with base closeness enforcement (root-of-unity domain).
 
 Theorem mapping (BCIKS'20, Thm. 6.2):
   If Pr_r[ u^(r) is δ-close ] > err  ⇒ every base u_j is δ-close.
-  In code we enforce a CA fraction threshold using
-      beta = 1 - err,
-  where (clamped to [0,1], with |F|=p):
+  We therefore test the strict condition:
+      (# of δ-close combos among tested alphas) / (# alphas)  >  err
+  implemented as:
+      CA_ok  ⇔  CA_good ≥ floor(err * total) + 1.
+
+Regimes for err (clamped to [0,1], with |F|=p):
       err = c1 * (k n)/p     for 0 < δ < (1-ρ)/2
       err = c2 * (k n^2)/p   for (1-ρ)/2 < δ < 1 - 1.01*sqrt(ρ)
 
@@ -16,10 +19,10 @@ Conventions:
   - Agreement threshold: s = ceil((1 - δ) n).
   - We *enforce base closeness*: trials where any base f_j has agreement < s
     are skipped (CA/MCA not even attempted).
-  - Counterexample condition: base_closeness holds, CA holds (≥ β), but MCA
-    witness size < s.
+  - Counterexample condition: base_closeness holds, strict-CA holds (per err),
+    but MCA witness size < s.
 
-Defaults (toy, but β can still be strict on small fields):
+Defaults (toy):
   p=79, n=6, k=2, ell=2, tries=50, delta auto (just inside Johnson), seed=None
   c1=c2=1.0
 """
@@ -127,7 +130,7 @@ def gen_instance(xs, p, k, ell, mode="noisy_codewords", err_frac=0.45):
             for i in flips:
                 y[i] = (y[i] + 1 + random.randrange(p-1)) % p
             fs.append(y)
-        return fs  # <-- fix: return AFTER the loop
+        return fs  # return AFTER the loop
     if mode != "patchwork":
         raise ValueError("use mode='patchwork' or 'noisy_codewords'")
     for _ in range(ell):
@@ -173,10 +176,10 @@ def check_base_closeness(fs, xs, k, p, s):
         if agree < s: ok = False
     return ok, records
 
-def correlated_agreement(xs, fs, k, p, alphas, s, beta):
+def correlated_agreement(xs, fs, k, p, alphas, s):
     """
-    For fraction >= beta of alphas, the combo f*_alpha must achieve >= s agreement.
-    Returns: (ok_beta, frac, good, total, records)
+    Strict CA counting: how many alphas give agreement >= s.
+    Returns: (frac, good, total, records)
     """
     good = 0
     records = []
@@ -188,7 +191,7 @@ def correlated_agreement(xs, fs, k, p, alphas, s, beta):
             good += 1
     total = len(alphas)
     frac = good / total if total > 0 else 0.0
-    return (frac >= beta), frac, good, total, records
+    return frac, good, total, records
 
 def mutual_agreement(xs, fs, k, p):
     """
@@ -216,7 +219,7 @@ def mutual_agreement(xs, fs, k, p):
             if best == n: break
     return best, bestS
 
-# ---------------- err and beta ----------------
+# ---------------- err ----------------
 
 def compute_err(p: int, n: int, k: int, delta: float, rho: float, c1: float, c2: float) -> float:
     """
@@ -235,12 +238,6 @@ def compute_err(p: int, n: int, k: int, delta: float, rho: float, c1: float, c2:
         # outside the stated regimes; treat as vacuous (err = 1)
         err = 1.0
     return max(0.0, min(1.0, err))
-
-def compute_beta_from_err(err: float) -> float:
-    """
-    beta = 1 - err, clamped to [0,1].
-    """
-    return max(0.0, min(1.0, 1.0 - err))
 
 # ---------------- Runner ----------------
 
@@ -267,9 +264,8 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
 
     s = math.ceil((1 - delta) * n)
 
-    # err per theorem ⇒ beta = 1 - err
+    # err per theorem (no beta nonsense)
     err = compute_err(p, n, k, delta, rho, c1, c2)
-    beta = compute_beta_from_err(err)
 
     if alphas is None:
         alphas = list(range(p))
@@ -292,26 +288,20 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
         last_base_summary = {"ok": True, "records": base_records}
         tested_after_base += 1
 
-        CA_ok, CA_frac, CA_good, CA_total, CA_records = correlated_agreement(
-            xs, fs, k, p, alphas, s, beta
+        CA_frac, CA_good, CA_total, CA_records = correlated_agreement(
+            xs, fs, k, p, alphas, s
         )
 
-        # theorem-style requirement: Pr[u^(r) δ-close] > err  ⇒ strict '>'
+        # strict theorem requirement: Pr[u^(r) δ-close] > err  ⇒ strict '>'
         passes_needed_err = int(math.floor(err * CA_total)) + 1
-        meets_err_requirement = (CA_good >= passes_needed_err)
-
-        # beta-style requirement: fraction ≥ beta (beta = 1 - err)
-        passes_needed_beta = int(math.ceil(beta * CA_total))
-        meets_beta_requirement = (CA_good >= passes_needed_beta)
+        CA_ok = (CA_good >= passes_needed_err)
 
         last_CA_summary = {
             "good": CA_good,
             "total": CA_total,
             "frac": CA_frac,
             "passes_needed_err_strict": passes_needed_err,
-            "meets_err_requirement": meets_err_requirement,
-            "passes_needed_beta": passes_needed_beta,
-            "meets_beta_requirement": meets_beta_requirement
+            "meets_err_requirement": CA_ok
         }
 
         MCA_size, MCA_S = mutual_agreement(xs, fs, k, p)
@@ -321,21 +311,19 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
                 "params": {
                     "p": p, "n": n, "k": k, "ell": ell,
                     "rho": rho, "delta": delta, "s": s,
-                    "err": err, "beta": beta, "c1": c1, "c2": c2,
+                    "err": err, "c1": c1, "c2": c2,
                     "mode": mode, "err_frac": err_frac
                 },
                 "domain": xs,
                 "fs": fs,
                 "base_closeness": last_base_summary,
                 "CA": {
-                    "ok_beta": CA_ok,
+                    "ok": CA_ok,
                     "good": CA_good,
                     "total": CA_total,
                     "frac": CA_frac,
                     "passes_needed_err_strict": passes_needed_err,
-                    "meets_err_requirement": meets_err_requirement,
-                    "passes_needed_beta": passes_needed_beta,
-                    "meets_beta_requirement": meets_beta_requirement,
+                    "meets_err_requirement": CA_ok,
                     "records": CA_records
                 },
                 "MCA": {"size": MCA_size, "S": MCA_S},
@@ -346,14 +334,14 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
                 }
             }
             print(json.dumps(result, indent=2))
-            print(f">> COUNTEREXAMPLE: bases close, CA holds, MCA fails (size {MCA_size} < {s})")
+            print(f">> COUNTEREXAMPLE: bases close, strict-CA holds, MCA fails (size {MCA_size} < {s})")
             return result
 
     # No counterexample found: still print params + last PASSING base + CA summary + stats
     params = {
         "p": p, "n": n, "k": k, "ell": ell,
         "rho": rho, "delta": delta, "s": s,
-        "err": err, "beta": beta, "c1": c1, "c2": c2,
+        "err": err, "c1": c1, "c2": c2,
         "mode": mode, "err_frac": err_frac
     }
     out = {"params": params}
@@ -431,7 +419,7 @@ if __name__ == "__main__":
                     help="Constant for err = c2 * (k n^2)/|F| in the Johnson regime.")
     ap.add_argument("--seed", type=int, default=None,
                     help="Random seed for reproducibility.")
-    # NEW CLI flags
+    # CLI flags
     ap.add_argument("--mode", type=str, default="noisy_codewords",
                     choices=["noisy_codewords", "patchwork"],
                     help="Instance generation mode.")
