@@ -86,6 +86,58 @@ def root_of_unity_domain(p: int, n: int):
         raise RuntimeError("domain elements not distinct (unexpected)")
     return xs
 
+# ---------------- Agreement checks ----------------
+
+def make_delta_close_word(xs, p, k, delta, rng=None):
+    """
+    Return a single word y that is δ-close to the RS code C.
+    """
+    if rng is None:
+        rng = random
+    n = len(xs)
+
+    # pick a random codeword
+    coeffs = [rng.randrange(p) for _ in range(k)]
+    c = eval_poly_vector(coeffs, xs, p)
+
+    # flip floor(delta * n) positions
+    t = max(0, math.floor(delta * n))
+    flip_positions = rng.sample(range(n), t)
+    y = c[:]
+    for i in flip_positions:
+        y[i] = (y[i] + 1 + rng.randrange(p - 1)) % p
+
+    return y
+
+def is_delta_close(y, xs, k, p, delta):
+    """
+    Check if a received word y is δ-close to the RS code C.
+
+    δ-close ⇔ agreement ≥ ceil((1 - δ) * n),
+    where agreement = max over codewords of matches with y.
+    """
+    n = len(xs)
+    threshold = math.ceil((1 - delta) * n)
+    agreement = best_agreement_exact(y, xs, k, p)
+    return agreement >= threshold
+
+def best_agreement_exact(y, xs, k, p):
+    """
+    Max agreement with a degree<k polynomial by brute force:
+      try all k-subsets, interpolate, evaluate, count matches.
+    """
+    n = len(xs); best = -1
+    for T in itertools.combinations(range(n), k):
+        coeffs = interpolate_lagrange([xs[i] for i in T],
+                                      [y[i] for i in T], k, p)
+        cw = eval_poly_vector(coeffs, xs, p)
+        agree = sum(cw[i] == y[i] for i in range(n))
+        if agree > best:
+            best = agree
+            if best == n: break
+    return best
+
+# ---------------- Runner ----------------
 
 def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
         seed: Optional[int] = None):
@@ -101,7 +153,7 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
     xs = root_of_unity_domain(p, n)
     # rate under this script's convention: rho = k/n  (degree < k ⇒ dimension = k)
     rho = k / n
-    delta = 1 - math.sqrt(rho) - 0.05  # just inside Johnson radius
+    delta = 1 - 1.01*math.sqrt(rho) # just inside Johnson radius
 
 if __name__ == "__main__":
     import argparse
