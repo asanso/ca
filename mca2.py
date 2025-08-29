@@ -292,17 +292,30 @@ def run(p: int = 13, n: int = 6, k: int = 2, ell: int = 2, tries: int = 10,
         MCA_size, MCA_S, MCA_debug = mutual_agreement_debug(xs, fs, k, p, delta, s)
 
         if CA_ok and MCA_size < s:
+            # pick the first witness α from CA
+            witness_alpha = ca_witnesses[0]["alpha"] if ca_witnesses else None
+            witness_agree = ca_witnesses[0]["agree_indices"] if ca_witnesses else []
+            witness_combo = gen_linear_combo(fs, witness_alpha, p) if witness_alpha is not None else None
+
             result = {
                 "trial": t,
                 "params": {"p": p, "n": n, "k": k, "ell": ell, "rho": rho,
                            "delta": delta, "s": s, "aligned": aligned},
                 "fs": fs,
                 "CA": {"ok": CA_ok, "good": good, "records": ca_records, "witnesses": ca_witnesses},
-                "MCA": {"size": MCA_size, "S": MCA_S, "debug": MCA_debug}
+                "MCA": {"size": MCA_size, "S": MCA_S, "debug": MCA_debug},
+                "CA_witness": {
+                    "alpha": witness_alpha,
+                    "combo_word": witness_combo,
+                    "agree_indices": witness_agree
+                }
             }
             print(json.dumps(result, indent=2))
-            print(f">> COUNTEREXAMPLE: CA holds but MCA fails (MCA_size={MCA_size} < s={s})")
+            print(f">> COUNTEREXAMPLE: CA holds via α={witness_alpha} "
+                  f"(agreement on {witness_agree}), but MCA fails "
+                  f"(MCA_size={MCA_size} < s={s})")
             return result
+
     print("no counterexample found")
     return None
 
