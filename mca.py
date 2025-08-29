@@ -115,6 +115,5 @@ if __name__ == "__main__":
                     help="Random seed for reproducibility.")
     args = ap.parse_args()
 
-
     run(p=args.p, n=args.n, k=args.k, ell=args.ell,
         tries=args.tries,seed=args.seed)
