@@ -5,12 +5,11 @@
 RS MCA/CA fuzzer (Johnson regime, root-of-unity domain) with diagnostics.
 
 - δ = 1 - 1.01*sqrt(rho), s = ceil((1-δ)*n)
-- δ-close generators (aligned/unaligned) + optional forced multi-candidate case (--use-multi)
-- CA uses Johnson list decoding; for each α it records:
-    • list_size
-    • if list_size>0: first codeword and its agree indices with the combo
-    • if list_size==0: why_no_list (best-agreement witness & deficit)
-- MCA reports size and witness set S, plus per-prover candidate & agree-indices and a clear reason
+- δ-close generators (aligned/unaligned)
+- CA uses Johnson list decoding over nontrivial alphas (skips alpha=0)
+  • per-α: list_size; if >0, first codeword + agree indices with combo
+  • if list_size==0: 'why_no_list' (best-agreement witness & deficit)
+- MCA: per-prover Johnson candidate agree-sets and intersection; clear reason
 
 Emits counterexample if CA_ok and MCA_size < s.
 Designed for small n (n ≤ ~12) so brute force is feasible.
@@ -168,10 +167,10 @@ def correlated_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
                          alphas: List[int], delta: float):
     """
     CA with list decoding + debug: per-α list_size, first codeword (if any),
-    and its agree indices with the combo. Also returns witnesses summary.
+    and its agree indices with the combo. Also returns a compact list of CA witnesses.
     """
     good = 0; records = []
-    witnesses = []  # all α that pass with their agree indices
+    witnesses = []  # α that pass, with first decoded codeword and agree indices
     for a in alphas:
         combo = gen_linear_combo(fs, a, p)
         s_needed, good_list = list_decode(combo, xs, k, p, delta)
@@ -194,7 +193,7 @@ def correlated_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
             agree_indices = [i for i in range(len(xs)) if cw[i] == combo[i]]
             rec["first_codeword"] = cw
             rec["agree_indices"] = agree_indices
-            witnesses.append({"alpha": a, "agree_indices": agree_indices})
+            witnesses.append({"alpha": a, "first_codeword": cw, "agree_indices": agree_indices, "combo_word": combo})
             good += 1
         records.append(rec)
     return good, records, witnesses
@@ -277,43 +276,52 @@ def run(p: int = 13, n: int = 6, k: int = 2, ell: int = 2, tries: int = 10,
     xs = root_of_unity_domain(p, n)
     rho = k / n
     delta = 1 - 1.01 * math.sqrt(rho)  # Johnson-ish radius
-    if alphas is None:
-        alphas = list(range(min(p, 16)))
     s = math.ceil((1 - delta) * n)
+
+    # Build alpha set; skip alpha == 0 (nontrivial combos only)
+    if alphas is None:
+        alphas = list(range(1, min(p, 16)))  # 1..min(p-1,16)
+    else:
+        alphas = [a % p for a in alphas if (a % p) != 0]
+        if not alphas:
+            alphas = list(range(1, min(p, 16)))
 
     for t in range(tries):
         fs = gen_instance(xs, p, k, ell, delta, aligned)
 
-        # CA (Johnson)
+        # CA (Johnson over nontrivial alphas)
         good, ca_records, ca_witnesses = correlated_agreement(xs, fs, k, p, alphas, delta)
-        CA_ok = (good >= 1)  # ∃ α with nonempty list
+        CA_ok = (good >= 1)  # exists nontrivial alpha with a nonempty list
 
         # MCA (diagnostic)
         MCA_size, MCA_S, MCA_debug = mutual_agreement_debug(xs, fs, k, p, delta, s)
 
         if CA_ok and MCA_size < s:
-            # pick the first witness α from CA
-            witness_alpha = ca_witnesses[0]["alpha"] if ca_witnesses else None
-            witness_agree = ca_witnesses[0]["agree_indices"] if ca_witnesses else []
-            witness_combo = gen_linear_combo(fs, witness_alpha, p) if witness_alpha is not None else None
+            # pick the first CA witness for clarity
+            w_alpha = ca_witnesses[0]["alpha"]
+            w_combo = ca_witnesses[0]["combo_word"]
+            w_cw    = ca_witnesses[0]["first_codeword"]
+            w_idx   = ca_witnesses[0]["agree_indices"]
 
             result = {
                 "trial": t,
                 "params": {"p": p, "n": n, "k": k, "ell": ell, "rho": rho,
                            "delta": delta, "s": s, "aligned": aligned},
                 "fs": fs,
-                "CA": {"ok": CA_ok, "good": good, "records": ca_records, "witnesses": ca_witnesses},
-                "MCA": {"size": MCA_size, "S": MCA_S, "debug": MCA_debug},
-                "CA_witness": {
-                    "alpha": witness_alpha,
-                    "combo_word": witness_combo,
-                    "agree_indices": witness_agree
-                }
+                "CA": {
+                    "ok": CA_ok, "good": good, "records": ca_records,
+                    "witness": {
+                        "alpha": w_alpha,
+                        "combo_word": w_combo,
+                        "decoded_codeword": w_cw,
+                        "agree_indices": w_idx
+                    }
+                },
+                "MCA": {"size": MCA_size, "S": MCA_S, "debug": MCA_debug}
             }
             print(json.dumps(result, indent=2))
-            print(f">> COUNTEREXAMPLE: CA holds via α={witness_alpha} "
-                  f"(agreement on {witness_agree}), but MCA fails "
-                  f"(MCA_size={MCA_size} < s={s})")
+            print(f">> COUNTEREXAMPLE: CA holds via alpha={w_alpha} (agree on indices {w_idx}), "
+                  f"but MCA fails: size {MCA_size} < s={s}, S={MCA_S}")
             return result
 
     print("no counterexample found")
@@ -331,7 +339,7 @@ if __name__ == "__main__":
     ap.add_argument("--tries", type=int, default=10)
     ap.add_argument("--aligned", action="store_true", help="Use same flipped indices across provers")
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--alphas", type=str, default=None, help="Comma list '0,3,5' or integer N => 0..N-1")
+    ap.add_argument("--alphas", type=str, default=None, help="Comma list '0,3,5' or integer N => 0..N-1 (0 is ignored)")
     args = ap.parse_args()
 
     def parse_alphas(arg: Optional[str], p: int) -> Optional[List[int]]:
