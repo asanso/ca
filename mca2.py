@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-RS MCA/CA fuzzer (Johnson regime, root-of-unity domain) with diagnostics.
+RS MCA/CA fuzzer (Johnson regime, root-of-unity domain) with CA_witness_check.
 
 - δ = 1 - 1.01*sqrt(rho), s = ceil((1-δ)*n)
 - δ-close generators (aligned/unaligned)
-- CA uses Johnson list decoding over nontrivial alphas (skips alpha=0)
-  • per-α: list_size; if >0, first codeword + agree indices with combo
-  • if list_size==0: 'why_no_list' (best-agreement witness & deficit)
-- MCA: per-prover Johnson candidate agree-sets and intersection; clear reason
+- CA uses Johnson list decoding; records per-α list_size and, for the first passing α,
+  remembers (alpha, combo, decoded codeword, agree_indices) as a CA witness.
+- MCA reports size and witness set S, plus per-prover candidate & agree-indices.
 
-Emits counterexample if CA_ok and MCA_size < s.
-Designed for small n (n ≤ ~12) so brute force is feasible.
+On a counterexample (CA_ok and MCA_size < s), prints:
+  1) the full JSON result, and
+  2) a CA_witness_check block showing the combo word, decoded codeword, and per-index matches.
 """
 
 import itertools, math, random, json
@@ -166,12 +166,14 @@ def gen_linear_combo(fs: List[List[int]], alpha: int, p: int) -> List[int]:
 def correlated_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
                          alphas: List[int], delta: float):
     """
-    CA with list decoding + debug: per-α list_size, first codeword (if any),
-    and its agree indices with the combo. Also returns a compact list of CA witnesses.
+    CA with list decoding + debug: per-α list_size and, for the first α that passes,
+    return a witness (alpha, combo, decoded codeword, agree_indices).
     """
     good = 0; records = []
-    witnesses = []  # α that pass, with first decoded codeword and agree indices
+    witness = None  # dict with keys: alpha, combo_word, decoded_codeword, agree_indices
     for a in alphas:
+        if a == 0:  # skip alpha=0 as requested
+            continue
         combo = gen_linear_combo(fs, a, p)
         s_needed, good_list = list_decode(combo, xs, k, p, delta)
         list_size = len(good_list)
@@ -193,10 +195,16 @@ def correlated_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
             agree_indices = [i for i in range(len(xs)) if cw[i] == combo[i]]
             rec["first_codeword"] = cw
             rec["agree_indices"] = agree_indices
-            witnesses.append({"alpha": a, "first_codeword": cw, "agree_indices": agree_indices, "combo_word": combo})
+            if witness is None:
+                witness = {
+                    "alpha": a,
+                    "combo_word": combo,
+                    "decoded_codeword": cw,
+                    "agree_indices": agree_indices
+                }
             good += 1
         records.append(rec)
-    return good, records, witnesses
+    return good, records, witness
 
 def mutual_agreement_debug(xs: List[int], fs: List[List[int]], k: int, p: int,
                            delta: float, s: int):
@@ -276,51 +284,54 @@ def run(p: int = 13, n: int = 6, k: int = 2, ell: int = 2, tries: int = 10,
     xs = root_of_unity_domain(p, n)
     rho = k / n
     delta = 1 - 1.01 * math.sqrt(rho)  # Johnson-ish radius
-    s = math.ceil((1 - delta) * n)
-
-    # Build alpha set; skip alpha == 0 (nontrivial combos only)
     if alphas is None:
-        alphas = list(range(1, min(p, 16)))  # 1..min(p-1,16)
-    else:
-        alphas = [a % p for a in alphas if (a % p) != 0]
-        if not alphas:
-            alphas = list(range(1, min(p, 16)))
+        alphas = list(range(min(p, 16)))
+    s = math.ceil((1 - delta) * n)
 
     for t in range(tries):
         fs = gen_instance(xs, p, k, ell, delta, aligned)
 
-        # CA (Johnson over nontrivial alphas)
-        good, ca_records, ca_witnesses = correlated_agreement(xs, fs, k, p, alphas, delta)
-        CA_ok = (good >= 1)  # exists nontrivial alpha with a nonempty list
+        # CA (Johnson)
+        good, ca_records, ca_witness = correlated_agreement(xs, fs, k, p, alphas, delta)
+        CA_ok = (good >= 1)  # ∃ α with nonempty list
 
         # MCA (diagnostic)
         MCA_size, MCA_S, MCA_debug = mutual_agreement_debug(xs, fs, k, p, delta, s)
 
         if CA_ok and MCA_size < s:
-            # pick the first CA witness for clarity
-            w_alpha = ca_witnesses[0]["alpha"]
-            w_combo = ca_witnesses[0]["combo_word"]
-            w_cw    = ca_witnesses[0]["first_codeword"]
-            w_idx   = ca_witnesses[0]["agree_indices"]
-
+            # Prepare result JSON
             result = {
                 "trial": t,
                 "params": {"p": p, "n": n, "k": k, "ell": ell, "rho": rho,
                            "delta": delta, "s": s, "aligned": aligned},
                 "fs": fs,
                 "CA": {
-                    "ok": CA_ok, "good": good, "records": ca_records,
-                    "witness": {
-                        "alpha": w_alpha,
-                        "combo_word": w_combo,
-                        "decoded_codeword": w_cw,
-                        "agree_indices": w_idx
-                    }
+                    "ok": CA_ok, "good": good,
+                    "records": ca_records,
+                    "witness": ca_witness  # may be None if CA_ok came from later alphas skipped? (unlikely)
                 },
                 "MCA": {"size": MCA_size, "S": MCA_S, "debug": MCA_debug}
             }
             print(json.dumps(result, indent=2))
-            print(f">> COUNTEREXAMPLE: CA holds via alpha={w_alpha} (agree on indices {w_idx}), "
+
+            # Extra clarity: CA_witness_check (only if we actually have a witness)
+            if ca_witness is not None:
+                u = ca_witness["combo_word"]
+                cw = ca_witness["decoded_codeword"]
+                per_index = [{"i": i, "combo": u[i], "decoded": cw[i], "match": (u[i] == cw[i])}
+                             for i in range(len(u))]
+                print(json.dumps({
+                    "CA_witness_check": {
+                        "alpha": ca_witness["alpha"],
+                        "combo_word_u_alpha": u,
+                        "decoded_codeword": cw,
+                        "agree_indices": ca_witness["agree_indices"],
+                        "per_index_match": per_index
+                    }
+                }, indent=2))
+
+            print(f">> COUNTEREXAMPLE: CA holds via alpha={ca_witness['alpha'] if ca_witness else '<?>'} "
+                  f"(agree on indices {ca_witness['agree_indices'] if ca_witness else '<?>'}), "
                   f"but MCA fails: size {MCA_size} < s={s}, S={MCA_S}")
             return result
 
@@ -339,7 +350,7 @@ if __name__ == "__main__":
     ap.add_argument("--tries", type=int, default=10)
     ap.add_argument("--aligned", action="store_true", help="Use same flipped indices across provers")
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--alphas", type=str, default=None, help="Comma list '0,3,5' or integer N => 0..N-1 (0 is ignored)")
+    ap.add_argument("--alphas", type=str, default=None, help="Comma list '0,3,5' or integer N => 0..N-1")
     args = ap.parse_args()
 
     def parse_alphas(arg: Optional[str], p: int) -> Optional[List[int]]:
