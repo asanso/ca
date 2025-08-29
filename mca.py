@@ -109,6 +109,31 @@ def make_delta_close_word(xs, p, k, delta, rng=None):
 
     return y
 
+def make_delta_close_family(xs, p, k, delta, ell, rng=None):
+    """
+    Generate ell words f1,...,fell that are δ-close on the SAME agreement set S.
+    """
+    if rng is None:
+        rng = random
+    n = len(xs)
+    s = math.ceil((1 - delta) * n)
+
+    # choose common agreement set S
+    S = set(rng.sample(range(n), s))
+
+    fs = []
+    for _ in range(ell):
+        coeffs = [rng.randrange(p) for _ in range(k)]
+        c = eval_poly_vector(coeffs, xs, p)
+        y = c[:]
+        for i in range(n):
+            if i not in S:
+                # flip to something non-codeword
+                y[i] = (y[i] + 1 + rng.randrange(p-1)) % p
+        fs.append(y)
+    return fs, S
+
+
 def is_delta_close(y, xs, k, p, delta):
     """
     Check if a received word y is δ-close to the RS code C.
@@ -137,6 +162,39 @@ def best_agreement_exact(y, xs, k, p):
             if best == n: break
     return best
 
+def gen_linear_combo(fs, alpha, p):
+    ell = len(fs); n = len(fs[0])
+    weights = [pow(alpha, j, p) for j in range(ell)]
+    return [(sum(weights[j] * fs[j][i] for j in range(ell)) % p) for i in range(n)]
+
+def correlated_agreement(xs, fs, k, p, alphas, s):
+    good = 0
+    records = []
+    for a in alphas:
+        combo = gen_linear_combo(fs, a, p)
+        agree = best_agreement_exact(combo, xs, k, p)
+        records.append((a, agree))
+        if agree >= s:
+            good += 1
+    total = len(alphas)
+    frac = good / total if total > 0 else 0.0
+    return frac, good, total, records
+
+def compute_err(p: int, n: int, k: int, delta: float, rho: float) -> float:
+    """
+    Compute theorem error bound.
+    We are interested in Johnson bound case: (1-rho)/2 < δ < 1-1.01√ρ.
+    """
+    if delta <= 0 or delta >= 1:
+        return 1.0
+    if delta < (1 - rho) / 2:
+        return (k * n) / p
+    elif delta < 1 - 1.01 * math.sqrt(rho):
+        return (k * (n ** 2)) / p
+    else:
+        return 1.0
+
+
 # ---------------- Runner ----------------
 
 def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
@@ -154,13 +212,31 @@ def run(p: int = 79, n: int = 6, k: int = 2, ell: int = 2, tries: int = 50,
     # rate under this script's convention: rho = k/n  (degree < k ⇒ dimension = k)
     rho = k / n
     delta = 1 - 1.01*math.sqrt(rho) # just inside Johnson radius
+    s = math.ceil((1 - delta) * n)
+    alphas = list(range(p))  # use all α ∈ F_p
+
+    # generate two δ-close words
+ 
+    fs, S = make_delta_close_family(xs, p, k, delta, ell=2)
+    print(fs)
+    print(f"Common agreement set S of size {len(S)}: {S}")
+    frac, good, total, records = correlated_agreement(xs, fs, k, p, alphas, s)
+
+    err = compute_err(p, n, k, delta, rho)
+    passes_needed = math.floor(err * total)
+    CA_ok = (good >= passes_needed)
+
+    print(f"δ = {delta:.4f}, threshold s = {s}")
+    print(f"Correlated Agreement: {good}/{total} (frac={frac:.3f})")
+    print(f"err = {err:.6f}, passes_needed = {passes_needed}, CA_ok = {CA_ok}")
+    
 
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--p", type=int, default=13)
     ap.add_argument("--n", type=int, default=6)
-    ap.add_argument("--k", type=int, default=2)
+    ap.add_argument("--k", type=int, default=3)
     ap.add_argument("--ell", type=int, default=2)
     ap.add_argument("--tries", type=int, default=50)
     ap.add_argument("--seed", type=int, default=None,
