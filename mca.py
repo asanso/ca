@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-RS MCA/CA fuzzer (Johnson regime, root-of-unity domain) with CA_witness_check.
+RS MCA/CA fuzzer (Johnson regime, root-of-unity domain) with proper multi-candidate handling.
 
 - δ = 1 - 1.01*sqrt(rho), s = ceil((1-δ)*n)
-- δ-close generators (aligned/unaligned)
-- CA uses Johnson list decoding; records per-α list_size and, for the first passing α,
-  remembers (alpha, combo, decoded codeword, agree_indices) as a CA witness.
-- MCA reports size and witness set S, plus per-prover candidate & agree-indices.
+- δ-close generators (aligned/unaligned); optional strict mode without forced flips
+- CA records ALL candidates per α and returns the best-agreement witness
+- MCA v2: like CA per α, but require all alphas to agree on the same subset S
 
 On a counterexample (CA_ok and MCA_size < s), prints:
   1) the full JSON result, and
@@ -16,7 +15,7 @@ On a counterexample (CA_ok and MCA_size < s), prints:
 """
 
 import itertools, math, random, json
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 # ---------------- Field & poly utils ----------------
 
@@ -99,13 +98,24 @@ def root_of_unity_domain(p: int, n: int) -> List[int]:
 def rand_poly(k: int, p: int) -> List[int]:
     return [random.randrange(p) for _ in range(k)]
 
-def gen_instance(xs: List[int], p: int, k: int, ell: int, delta: float, aligned: bool = True) -> List[List[int]]:
-    """Generate ℓ δ-close words; aligned flips => same flipped indices."""
+def gen_instance(xs: List[int], p: int, k: int, ell: int, delta: float,
+                 aligned: bool = True, force_at_least_one_flip: bool = True) -> List[List[int]]:
+    """
+    Generate ℓ δ-close words; 'aligned' => same flipped indices across provers.
+    """
     n = len(xs)
     fs: List[List[int]] = []
+    def pick_t():
+        t = math.floor(delta * n)
+        if force_at_least_one_flip:
+            t = max(1, t)
+        else:
+            t = max(0, t)
+        return t
+
     if aligned:
-        t = max(1, math.floor(delta * n))
-        flips = sorted(random.sample(range(n), t))
+        t = pick_t()
+        flips = sorted(random.sample(range(n), t)) if t > 0 else []
         for _ in range(ell):
             coeffs = rand_poly(k, p)
             c = eval_poly_vector(coeffs, xs, p)
@@ -115,8 +125,8 @@ def gen_instance(xs: List[int], p: int, k: int, ell: int, delta: float, aligned:
             fs.append(y)
     else:
         for _ in range(ell):
-            t = max(1, math.floor(delta * n))
-            flips = sorted(random.sample(range(n), t))
+            t = pick_t()
+            flips = sorted(random.sample(range(n), t)) if t > 0 else []
             coeffs = rand_poly(k, p)
             c = eval_poly_vector(coeffs, xs, p)
             y = c[:]
@@ -131,17 +141,17 @@ def list_decode(y: List[int], xs: List[int], k: int, p: int, delta: float):
     """Return threshold s and *all* RS codewords agreeing with y on ≥ s coords."""
     n = len(xs)
     s = math.ceil((1 - delta) * n)
-    codewords = {}
+    codewords: Dict[Tuple[int,...], int] = {}
     for T in itertools.combinations(range(n), k):
         coeffs = interpolate_lagrange([xs[i] for i in T], [y[i] for i in T], k, p)
         cw = tuple(eval_poly_vector(coeffs, xs, p))
         agree = sum(cw[i] == y[i] for i in range(n))
-        codewords[cw] = max(codewords.get(cw, 0), agree)
+        if agree > codewords.get(cw, -1):
+            codewords[cw] = agree
     good = [cw for cw, a in codewords.items() if a >= s]
     return s, good
 
 def best_agreement_witness(y: List[int], xs: List[int], k: int, p: int):
-    """Return (max_agree, coeffs_mod_p, codeword, indices_agree, mismatches)."""
     n = len(xs); best = -1; best_data = None
     for T in itertools.combinations(range(n), k):
         coeffs = interpolate_lagrange([xs[i] for i in T], [y[i] for i in T], k, p)
@@ -156,6 +166,34 @@ def best_agreement_witness(y: List[int], xs: List[int], k: int, p: int):
     coeffs_mod_p, cw, S_star, mism = best_data
     return best, coeffs_mod_p, cw, S_star, mism
 
+def decode_word_debug(word: List[int], xs: List[int], k: int, p: int, delta: float) -> Dict[str, Any]:
+    s_needed, good_list = list_decode(word, xs, k, p, delta)
+    rec: Dict[str, Any] = {"threshold_s": s_needed, "list_size": len(good_list)}
+    if not good_list:
+        max_agree, coeffs, cw, S_star, mism = best_agreement_witness(word, xs, k, p)
+        rec["why_no_list"] = {
+            "max_agreement": max_agree,
+            "deficit": s_needed - max_agree,
+            "best_poly_coeffs_mod_p": coeffs,
+            "best_codeword": cw,
+            "match_indices_best": S_star,
+            "mismatch_indices": mism,
+            "word": word
+        }
+        rec["candidates"] = []
+        return rec
+    cands = []
+    for cw in good_list:
+        agree = [i for i in range(len(xs)) if cw[i] == word[i]]
+        cands.append({
+            "codeword": list(cw),
+            "agree_indices": agree,
+            "agree_size": len(agree),
+        })
+    cands.sort(key=lambda e: e["agree_size"], reverse=True)
+    rec["candidates"] = cands
+    return rec
+
 # ---------------- CA / MCA ----------------
 
 def gen_linear_combo(fs: List[List[int]], alpha: int, p: int) -> List[int]:
@@ -165,156 +203,93 @@ def gen_linear_combo(fs: List[List[int]], alpha: int, p: int) -> List[int]:
 
 def correlated_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
                          alphas: List[int], delta: float):
-    """
-    CA with list decoding + debug: per-α list_size and, for the first α that passes,
-    return a witness (alpha, combo, decoded codeword, agree_indices).
-    """
-    good = 0; records = []
-    witness = None  # dict with keys: alpha, combo_word, decoded_codeword, agree_indices
+    good = 0
+    records = []
+    best_witness = None
+    best_agree_size = -1
     for a in alphas:
-        if a == 0:  # skip alpha=0 as requested
-            continue
+        if a == 0: continue
         combo = gen_linear_combo(fs, a, p)
-        s_needed, good_list = list_decode(combo, xs, k, p, delta)
-        list_size = len(good_list)
-        rec = {"alpha": a, "list_size": list_size}
-        if list_size == 0:
-            max_agree, coeffs, cw, S_star, mism = best_agreement_witness(combo, xs, k, p)
-            rec["why_no_list"] = {
-                "threshold_s": s_needed,
-                "max_agreement": max_agree,
-                "deficit": s_needed - max_agree,
-                "best_poly_coeffs_mod_p": coeffs,
-                "best_codeword": cw,
-                "match_indices_best": S_star,
-                "mismatch_indices": mism,
-                "combo_word": combo
-            }
-        else:
-            cw = list(good_list[0])
-            agree_indices = [i for i in range(len(xs)) if cw[i] == combo[i]]
-            rec["first_codeword"] = cw
-            rec["agree_indices"] = agree_indices
-            if witness is None:
-                witness = {
+        rec = decode_word_debug(combo, xs, k, p, delta)
+        rec["alpha"] = a
+        rec["combo_word"] = combo
+        if rec["list_size"] > 0:
+            good += 1
+            top = rec["candidates"][0]
+            if top["agree_size"] > best_agree_size:
+                best_agree_size = top["agree_size"]
+                best_witness = {
                     "alpha": a,
                     "combo_word": combo,
-                    "decoded_codeword": cw,
-                    "agree_indices": agree_indices
+                    "decoded_codeword": top["codeword"],
+                    "agree_indices": top["agree_indices"],
+                    "agree_size": top["agree_size"],
+                    "threshold_s": rec["threshold_s"],
                 }
-            good += 1
         records.append(rec)
-    return good, records, witness
+    return good, records, best_witness
 
-def mutual_agreement_debug(xs: List[int], fs: List[List[int]], k: int, p: int,
-                           delta: float, s: int):
+def mutual_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
+                        alphas: List[int], delta: float, s: int):
     """
-    MCA with diagnostics.
-    For each prover, take first list-decoded candidate (if any) and record agree-indices.
-    Compute intersection; report clear pass/fail reason.
+    MCA: run CA for each alpha, then require all nonempty lists to agree on a common S.
     """
-    n = len(xs); ell = len(fs)
-    per_prover = []
+    per_alpha = []
+    n = len(xs)
     empty = False
-    per_sizes = []
-
-    for j in range(ell):
-        _, good_list = list_decode(fs[j], xs, k, p, delta)
-        if not good_list:
-            per_prover.append({
-                "prover": j,
-                "has_candidate": False,
-                "candidate_codeword": None,
-                "agree_indices": [],
-                "word": fs[j]
-            })
-            per_sizes.append(0)
+    for a in alphas:
+        if a == 0: continue
+        combo = gen_linear_combo(fs, a, p)
+        rec = decode_word_debug(combo, xs, k, p, delta)
+        rec["alpha"] = a
+        rec["combo_word"] = combo
+        if rec["list_size"] == 0:
             empty = True
         else:
-            cw = good_list[0]
-            agree_set = [i for i in range(n) if cw[i] == fs[j][i]]
-            per_prover.append({
-                "prover": j,
-                "has_candidate": True,
-                "candidate_codeword": cw,
-                "agree_indices": agree_set,
-                "word": fs[j]
-            })
-            per_sizes.append(len(agree_set))
-
-    # Intersection of agree sets (only meaningful if no empty list)
+            rec["best_codeword"] = rec["candidates"][0]["codeword"]
+            rec["agree_indices"] = rec["candidates"][0]["agree_indices"]
+        per_alpha.append(rec)
     if empty:
-        intersection = []
-    else:
-        mask = [True] * n
-        for rec in per_prover:
-            cw = rec["candidate_codeword"]
-            for i in range(n):
-                if mask[i] and cw[i] != rec["word"][i]:
-                    mask[i] = False
-        intersection = [i for i in range(n) if mask[i]]
-
+        return 0, [], {"passes": False, "reason": f"MCA fails: at least one alpha had empty list; need s={s}", "per_alpha": per_alpha}
+    # intersect all agree sets
+    intersection = set(range(n))
+    for rec in per_alpha:
+        if rec["list_size"] > 0:
+            intersection &= set(rec["candidates"][0]["agree_indices"])
     size = len(intersection)
-    passes = (not empty) and (size >= s)
-
-    if empty:
-        reason = f"MCA fails: at least one prover has empty Johnson list, cannot reach s={s}."
-    elif passes:
-        reason = f"MCA passes: intersection size = {size}, meets threshold s={s}. S = {intersection}"
-    else:
-        reason = f"MCA fails: intersection size = {size}, below threshold s={s}. S = {intersection}"
-
-    debug = {
-        "passes": passes,
-        "needed_s": s,
-        "intersection_size": size,
-        "intersection_indices": intersection,
-        "per_prover_agree_sizes": per_sizes,
-        "per_prover": per_prover,
-        "reason": reason,
-    }
-    return size, intersection, debug
+    passes = size >= s
+    reason = (f"MCA passes: intersection size={size}, meets s={s}" if passes else
+              f"MCA fails: intersection size={size}, below s={s}")
+    return size, sorted(intersection), {"passes": passes, "reason": reason, "per_alpha": per_alpha}
 
 # ---------------- Runner ----------------
 
 def run(p: int = 13, n: int = 6, k: int = 2, ell: int = 2, tries: int = 10,
-        aligned: bool = False, alphas: Optional[List[int]] = None, seed: Optional[int] = None):
+        aligned: bool = False, alphas: Optional[List[int]] = None, seed: Optional[int] = None,
+        force_at_least_one_flip: bool = True):
     if seed is not None:
         random.seed(seed)
     xs = root_of_unity_domain(p, n)
     rho = k / n
-    delta = 1 - 1.01 * math.sqrt(rho)  # Johnson-ish radius
+    delta = 1 - 1.01 * math.sqrt(rho)
     if alphas is None:
         alphas = list(range(min(p, 16)))
     s = math.ceil((1 - delta) * n)
-
     for t in range(tries):
-        fs = gen_instance(xs, p, k, ell, delta, aligned)
-
-        # CA (Johnson)
+        fs = gen_instance(xs, p, k, ell, delta, aligned, force_at_least_one_flip=force_at_least_one_flip)
         good, ca_records, ca_witness = correlated_agreement(xs, fs, k, p, alphas, delta)
-        CA_ok = (good >= 1)  # ∃ α with nonempty list
-
-        # MCA (diagnostic)
-        MCA_size, MCA_S, MCA_debug = mutual_agreement_debug(xs, fs, k, p, delta, s)
-
+        CA_ok = (good >= 1)
+        MCA_size, MCA_S, MCA_debug = mutual_agreement(xs, fs, k, p, alphas, delta, s)
         if CA_ok and MCA_size < s:
-            # Prepare result JSON
             result = {
                 "trial": t,
                 "params": {"p": p, "n": n, "k": k, "ell": ell, "rho": rho,
                            "delta": delta, "s": s, "aligned": aligned},
                 "fs": fs,
-                "CA": {
-                    "ok": CA_ok, "good": good,
-                    "records": ca_records,
-                    "witness": ca_witness  # may be None if CA_ok came from later alphas skipped? (unlikely)
-                },
+                "CA": {"ok": CA_ok, "good": good, "records": ca_records, "witness": ca_witness},
                 "MCA": {"size": MCA_size, "S": MCA_S, "debug": MCA_debug}
             }
             print(json.dumps(result, indent=2))
-
-            # Extra clarity: CA_witness_check (only if we actually have a witness)
             if ca_witness is not None:
                 u = ca_witness["combo_word"]
                 cw = ca_witness["decoded_codeword"]
@@ -329,12 +304,9 @@ def run(p: int = 13, n: int = 6, k: int = 2, ell: int = 2, tries: int = 10,
                         "per_index_match": per_index
                     }
                 }, indent=2))
-
-            print(f">> COUNTEREXAMPLE: CA holds via alpha={ca_witness['alpha'] if ca_witness else '<?>'} "
-                  f"(agree on indices {ca_witness['agree_indices'] if ca_witness else '<?>'}), "
+            print(f">> COUNTEREXAMPLE: CA holds via alpha={ca_witness['alpha'] if ca_witness else '<?>'}, "
                   f"but MCA fails: size {MCA_size} < s={s}, S={MCA_S}")
             return result
-
     print("no counterexample found")
     return None
 
@@ -348,9 +320,10 @@ if __name__ == "__main__":
     ap.add_argument("--k", type=int, default=2)
     ap.add_argument("--ell", type=int, default=2)
     ap.add_argument("--tries", type=int, default=10)
-    ap.add_argument("--aligned", action="store_true", help="Use same flipped indices across provers")
+    ap.add_argument("--aligned", action="store_true")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--alphas", type=str, default=None, help="Comma list '0,3,5' or integer N => 0..N-1")
+    ap.add_argument("--no_force_flip", action="store_true")
     args = ap.parse_args()
 
     def parse_alphas(arg: Optional[str], p: int) -> Optional[List[int]]:
@@ -371,4 +344,5 @@ if __name__ == "__main__":
     parsed_alphas = parse_alphas(args.alphas, args.p)
 
     run(p=args.p, n=args.n, k=args.k, ell=args.ell, tries=args.tries,
-        aligned=args.aligned, alphas=parsed_alphas, seed=args.seed)
+        aligned=args.aligned, alphas=parsed_alphas, seed=args.seed,
+        force_at_least_one_flip=not args.no_force_flip)
