@@ -265,7 +265,7 @@ def mutual_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
 # ---------------- Runner ----------------
 
 def run(p: int = 13, n: int = 6, k: int = 2, ell: int = 2, tries: int = 10,
-        aligned: bool = False, alphas: Optional[List[int]] = None, seed: Optional[int] = None,
+        aligned: bool = True, alphas: Optional[List[int]] = None, seed: Optional[int] = None,
         force_at_least_one_flip: bool = True):
     if seed is not None:
         random.seed(seed)
@@ -320,7 +320,15 @@ if __name__ == "__main__":
     ap.add_argument("--k", type=int, default=2)
     ap.add_argument("--ell", type=int, default=2)
     ap.add_argument("--tries", type=int, default=10)
-    ap.add_argument("--aligned", action="store_true")
+    # Default to aligned; allow opting out with --unaligned
+    ap.add_argument(
+        "--aligned",
+        dest="aligned",
+        action="store_true",
+        help="Use aligned flips (default)."
+    )
+    ap.add_argument("--unaligned", dest="aligned", action="store_false", help="Use unaligned flips.")
+    ap.set_defaults(aligned=True)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--alphas", type=str, default=None, help="Comma list '0,3,5' or integer N => 0..N-1")
     ap.add_argument("--no_force_flip", action="store_true")
