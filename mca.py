@@ -203,64 +203,185 @@ def gen_linear_combo(fs: List[List[int]], alpha: int, p: int) -> List[int]:
 
 def correlated_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
                          alphas: List[int], delta: float):
+    """
+    CA (v2): for each alpha, decode and keep ALL candidates in the record.
+    For the global 'witness', pick the candidate (over ALL alphas) with maximum agree_size.
+    """
     good = 0
     records = []
     best_witness = None
     best_agree_size = -1
+
     for a in alphas:
-        if a == 0: continue
+        if a == 0:
+            continue
         combo = gen_linear_combo(fs, a, p)
         rec = decode_word_debug(combo, xs, k, p, delta)
         rec["alpha"] = a
         rec["combo_word"] = combo
+
         if rec["list_size"] > 0:
             good += 1
-            top = rec["candidates"][0]
-            if top["agree_size"] > best_agree_size:
-                best_agree_size = top["agree_size"]
-                best_witness = {
-                    "alpha": a,
-                    "combo_word": combo,
-                    "decoded_codeword": top["codeword"],
-                    "agree_indices": top["agree_indices"],
-                    "agree_size": top["agree_size"],
-                    "threshold_s": rec["threshold_s"],
-                }
+            # consider ALL candidates for this alpha
+            for cand in rec["candidates"]:
+                if cand["agree_size"] > best_agree_size:
+                    best_agree_size = cand["agree_size"]
+                    best_witness = {
+                        "alpha": a,
+                        "combo_word": combo,
+                        "decoded_codeword": cand["codeword"],
+                        "agree_indices": cand["agree_indices"],
+                        "agree_size": cand["agree_size"],
+                        "threshold_s": rec["threshold_s"],
+                    }
+
         records.append(rec)
+
     return good, records, best_witness
 
-def mutual_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
-                        alphas: List[int], delta: float, s: int):
+def _max_intersection_over_candidates(per_alpha: List[Dict[str, Any]], n: int,
+                                      exact_cap: int = 500_000, beam: int = 64):
     """
-    MCA: run CA for each alpha, then require all nonempty lists to agree on a common S.
+    Given per_alpha records (each has rec['candidates']), find the combination
+    (choose exactly one candidate per alpha) that maximizes the size of the
+    intersection of agree sets.
+
+    Returns (best_size, best_S, best_choice_idxs), where:
+      - best_S is a set of indices (intersection)
+      - best_choice_idxs is a list of candidate indices (one per alpha)
+
+    Strategy:
+      - If product of list sizes <= exact_cap: exact DFS with pruning.
+      - Else: beam search (greedy) to keep runtime bounded.
+    """
+    cand_sets = []
+    list_sizes = []
+    for rec in per_alpha:
+        if rec["list_size"] == 0:
+            return 0, set(), []  # impossible
+        sets = [set(c["agree_indices"]) for c in rec["candidates"]]
+        cand_sets.append(sets)
+        list_sizes.append(len(sets))
+
+    # exact search if feasible
+    total = 1
+    for m in list_sizes:
+        total *= m
+
+    if total <= exact_cap:
+        best_size = -1
+        best_S = set()
+        best_choice = []
+
+        def dfs(i, cur_set, choice):
+            nonlocal best_size, best_S, best_choice
+            if i == len(cand_sets):
+                sz = len(cur_set)
+                if sz > best_size:
+                    best_size = sz
+                    best_S = cur_set
+                    best_choice = choice[:]
+                return
+            # order candidates by descending set size for better pruning
+            order = sorted(range(len(cand_sets[i])),
+                           key=lambda j: len(cand_sets[i][j]),
+                           reverse=True)
+            for j in order:
+                nxt = cur_set & cand_sets[i][j]
+                # pruning: can't beat current best
+                if len(nxt) <= best_size:
+                    continue
+                choice.append(j)
+                dfs(i + 1, nxt, choice)
+                choice.pop()
+
+        dfs(0, set(range(n)), [])
+        if best_size < 0:
+            return 0, set(), []
+        return best_size, best_S, best_choice
+
+    # beam search fallback
+    BeamItem = tuple  # (intersection_set, choices_list)
+    beam_items: List[BeamItem] = [(set(range(n)), [])]
+
+    for i, sets in enumerate(cand_sets):
+        next_beam: List[BeamItem] = []
+        # try larger sets first
+        order = sorted(range(len(sets)), key=lambda j: len(sets[j]), reverse=True)
+        for S, choices in beam_items:
+            for j in order:
+                inter = S & sets[j]
+                if not inter:
+                    continue
+                next_beam.append((inter, choices + [j]))
+        if not next_beam:
+            return 0, set(), []
+        # keep top 'beam' by intersection size
+        next_beam.sort(key=lambda item: len(item[0]), reverse=True)
+        beam_items = next_beam[:beam]
+
+    best_inter, best_choices = max(beam_items, key=lambda item: len(item[0]))
+    return len(best_inter), best_inter, best_choices
+
+
+
+def mutual_agreement(xs: List[int], fs: List[List[int]], k: int, p: int,
+                     alphas: List[int], delta: float, s: int):
+    """
+    MCA v2: For each alpha, decode to a list. Then choose ONE candidate per alpha
+    (search over all candidates, exact with pruning or beam fallback) to maximize
+    the intersection size of the agree sets. Report pass/fail vs s and the
+    chosen combination.
     """
     per_alpha = []
     n = len(xs)
     empty = False
+
     for a in alphas:
-        if a == 0: continue
+        if a == 0:
+            continue
         combo = gen_linear_combo(fs, a, p)
         rec = decode_word_debug(combo, xs, k, p, delta)
         rec["alpha"] = a
         rec["combo_word"] = combo
+        per_alpha.append(rec)
         if rec["list_size"] == 0:
             empty = True
-        else:
-            rec["best_codeword"] = rec["candidates"][0]["codeword"]
-            rec["agree_indices"] = rec["candidates"][0]["agree_indices"]
-        per_alpha.append(rec)
+
     if empty:
-        return 0, [], {"passes": False, "reason": f"MCA fails: at least one alpha had empty list; need s={s}", "per_alpha": per_alpha}
-    # intersect all agree sets
-    intersection = set(range(n))
-    for rec in per_alpha:
-        if rec["list_size"] > 0:
-            intersection &= set(rec["candidates"][0]["agree_indices"])
-    size = len(intersection)
-    passes = size >= s
-    reason = (f"MCA passes: intersection size={size}, meets s={s}" if passes else
-              f"MCA fails: intersection size={size}, below s={s}")
-    return size, sorted(intersection), {"passes": passes, "reason": reason, "per_alpha": per_alpha}
+        return 0, [], {
+            "passes": False,
+            "reason": f"MCA fails: at least one alpha had empty list; need s={s}",
+            "per_alpha": per_alpha
+        }
+
+    best_size, best_S, best_choice_idxs = _max_intersection_over_candidates(per_alpha, n)
+
+    passes = best_size >= s
+    reason = (f"MCA passes: intersection size={best_size}, meets s={s}"
+              if passes else
+              f"MCA fails: intersection size={best_size}, below s={s}")
+
+    # annotate which candidate was chosen per alpha (if any)
+    chosen = []
+    if best_choice_idxs:
+        for rec, j in zip(per_alpha, best_choice_idxs):
+            cand = rec["candidates"][j]
+            chosen.append({
+                "alpha": rec["alpha"],
+                "chosen_candidate_index": j,
+                "agree_size": cand["agree_size"],
+                "agree_indices": cand["agree_indices"],
+                "codeword": cand["codeword"],
+            })
+
+    debug = {
+        "passes": passes,
+        "reason": reason,
+        "per_alpha": per_alpha,
+        "chosen_per_alpha": chosen
+    }
+    return best_size, sorted(best_S), debug
 
 # ---------------- Runner ----------------
 
@@ -315,9 +436,9 @@ def run(p: int = 13, n: int = 6, k: int = 2, ell: int = 2, tries: int = 10,
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--p", type=int, default=13)
-    ap.add_argument("--n", type=int, default=6)
-    ap.add_argument("--k", type=int, default=2)
+    ap.add_argument("--p", type=int, default=29)
+    ap.add_argument("--n", type=int, default=14)
+    ap.add_argument("--k", type=int, default=6)
     ap.add_argument("--ell", type=int, default=2)
     ap.add_argument("--tries", type=int, default=10)
     # Default to aligned; allow opting out with --unaligned
