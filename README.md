@@ -2,4 +2,4 @@
 
 # Usage
 
-`python3 mca.py`
+`python3 main.py`
