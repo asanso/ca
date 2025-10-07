@@ -20,12 +20,16 @@ Notes
 • Use --no_force_flip to allow zero flips when s = ceil((1-δ)n) equals n (otherwise raw acceptance is impossible).
 """
 
-import itertools, math, random, json, statistics
+import itertools
+import json
+import math
+import random
 from typing import Optional, Dict, Any, List, Tuple
 
 # ---------------- Field & poly utils ----------------
 
 def poly_eval(coeffs: List[int], x: int, p: int) -> int:
+    """Horner's rule."""
     y = 0
     for c in reversed(coeffs):
         y = (y * x + c) % p
@@ -60,33 +64,33 @@ def interpolate_lagrange(xs: List[int], ys: List[int], k: int, p: int) -> List[i
         num = [1]
         denom = 1
         for m in range(k):
-            if m == i: continue
+            if m == i: 
+                continue
             num = poly_mul(num, [(-xs[m]) % p, 1], p)   # (x - x_m)
             denom = (denom * ((xi - xs[m]) % p)) % p
         inv_denom = pow(denom, p - 2, p)
         li = poly_scale(num, (yi * inv_denom) % p, p)  # yi * L_i(x)
         coeffs = poly_add(coeffs, li, p)
-    coeffs = (coeffs + [0] * k)[:k]
-    return coeffs
+    return (coeffs + [0] * k)[:k]
 
 # ---------------- Domain ----------------
 
 def primitive_root(p: int) -> int:
-    if p == 2: return 1
+    if p == 2:
+        return 1
     phi = p - 1
-    fac = []
-    m = phi; d = 2
+    fac: List[int] = []
+    m, d = phi, 2
     while d * d <= m:
         while m % d == 0:
-            fac.append(d); m //= d
+            fac.append(d)
+            m //= d
         d += 1
-    if m > 1: fac.append(m)
+    if m > 1:
+        fac.append(m)
     for g in range(2, p):
-        ok = True
-        for q in set(fac):
-            if pow(g, phi // q, p) == 1:
-                ok = False; break
-        if ok: return g
+        if all(pow(g, phi // q, p) != 1 for q in set(fac)):
+            return g
     raise RuntimeError("no primitive root found")
 
 def root_of_unity_domain(p: int, n: int) -> List[int]:
@@ -104,55 +108,60 @@ def root_of_unity_domain(p: int, n: int) -> List[int]:
 def rand_poly(k: int, p: int) -> List[int]:
     return [random.randrange(p) for _ in range(k)]
 
-def gen_instance(xs: List[int], p: int, k: int, ell: int, delta: float,
-                 aligned: bool = True, force_at_least_one_flip: bool = True) -> List[List[int]]:
+def _num_flips(n: int, delta: float, force_at_least_one_flip: bool) -> int:
+    """How many coordinates to flip for a single word."""
+    t = math.floor(delta * n)
+    return max(1 if force_at_least_one_flip else 0, t)
+
+def _apply_flips(codeword: List[int], flips: List[int], p: int) -> List[int]:
+    """Return a copy with additive random noise at the given positions."""
+    y = codeword[:]
+    for i in flips:
+        y[i] = (y[i] + 1 + random.randrange(p - 1)) % p  # nonzero additive noise
+    return y
+
+def gen_instance(
+    xs: List[int],
+    p: int,
+    k: int,
+    ell: int,
+    delta: float,
+    aligned: bool = True,
+    force_at_least_one_flip: bool = True
+) -> List[List[int]]:
     """
     Generate ℓ δ-close words; 'aligned' => same flipped indices across provers.
     """
     n = len(xs)
-    fs: List[List[int]] = []
-
-    def pick_t():
-        t = math.floor(delta * n)
-        if force_at_least_one_flip:
-            t = max(1, t)
-        else:
-            t = max(0, t)
-        return t
-
+    # Pre-choose the flip set(s)
     if aligned:
-        t = pick_t()
-        flips = sorted(random.sample(range(n), t)) if t > 0 else []
-        for _ in range(ell):
-            coeffs = rand_poly(k, p)
-            c = eval_poly_vector(coeffs, xs, p)
-            y = c[:]
-            for i in flips:
-                y[i] = (y[i] + 1 + random.randrange(p - 1)) % p
-            fs.append(y)
+        t = _num_flips(n, delta, force_at_least_one_flip)
+        flips_per_word = [sorted(random.sample(range(n), t)) if t > 0 else []] * ell
     else:
+        flips_per_word = []
         for _ in range(ell):
-            t = pick_t()
-            flips = sorted(random.sample(range(n), t)) if t > 0 else []
-            coeffs = rand_poly(k, p)
-            c = eval_poly_vector(coeffs, xs, p)
-            y = c[:]
-            for i in flips:
-                y[i] = (y[i] + 1 + random.randrange(p - 1)) % p
-            fs.append(y)
+            t = _num_flips(n, delta, force_at_least_one_flip)
+            flips_per_word.append(sorted(random.sample(range(n), t)) if t > 0 else [])
+
+    fs: List[List[int]] = []
+    for j in range(ell):
+        coeffs = rand_poly(k, p)
+        clean = eval_poly_vector(coeffs, xs, p)
+        fs.append(_apply_flips(clean, flips_per_word[j], p))
     return fs
 
 # ---------------- List decoding & witnesses ----------------
 
-def list_decode(y: List[int], xs: List[int], k: int, p: int, delta: float) -> Tuple[int, List[Tuple[int,...]]]:
+def list_decode(y: List[int], xs: List[int], k: int, p: int, delta: float) -> Tuple[int, List[Tuple[int, ...]]]:
     """Return threshold s and *all* RS codewords agreeing with y on ≥ s coords."""
     n = len(xs)
     s = math.ceil((1 - delta) * n)
-    codewords: Dict[Tuple[int,...], int] = {}
+    codewords: Dict[Tuple[int, ...], int] = {}
     for T in itertools.combinations(range(n), k):
         coeffs = interpolate_lagrange([xs[i] for i in T], [y[i] for i in T], k, p)
         cw = tuple(eval_poly_vector(coeffs, xs, p))
         agree = sum(cw[i] == y[i] for i in range(n))
+        # keep best agreement per reconstructed codeword
         if agree > codewords.get(cw, -1):
             codewords[cw] = agree
     good = [cw for cw, a in codewords.items() if a >= s]
@@ -161,7 +170,7 @@ def list_decode(y: List[int], xs: List[int], k: int, p: int, delta: float) -> Tu
 # ---------------- CA (single alpha) ----------------
 
 def gen_linear_combo(fs: List[List[int]], alpha: int, p: int) -> List[int]:
-    ell = len(fs); n = len(fs[0])
+    ell, n = len(fs), len(fs[0])
     weights = [pow(alpha, j, p) for j in range(ell)]
     return [(sum(weights[j] * fs[j][i] for j in range(ell)) % p) for i in range(n)]
 
@@ -213,22 +222,18 @@ def run_soundness(
     s = math.ceil((1 - delta) * n)
 
     # Precompute theorem epsilons
-    eps = {tau: epsilon_tau(p, n, k, delta, tau) for tau in (4,5,6,7)}
+    eps = {tau: epsilon_tau(p, n, k, delta, tau) for tau in (4, 5, 6, 7)}
 
     # Sampling
     total_alpha = 0
     accept_alpha = 0
     per_instance_any_alpha_accept = 0
 
-    # For optional diagnostics
-    agree_sizes: List[int] = []
-
-    # Sample loop
     for _ in range(instances):
         fs = gen_instance(xs, p, k, ell, delta, aligned, force_at_least_one_flip)
-        # sample alphas uniformly from F_p^* (exclude 0)
         any_accept = False
-        for _j in range(alphas_per_instance):
+        # sample alphas uniformly from F_p^* (exclude 0)
+        for _ in range(alphas_per_instance):
             alpha = random.randrange(1, p)  # 1..p-1 inclusive
             ok = ca_accepts_for_alpha(xs, fs, k, p, alpha, delta)
             total_alpha += 1
@@ -242,50 +247,68 @@ def run_soundness(
     p_hat_any = per_instance_any_alpha_accept / instances if instances > 0 else 0.0
 
     # Report
-    out = {
+    out: Dict[str, Any] = {
         "params": {
-            "p": p, "n": n, "k": k, "ell": ell, "rho": rho,
-            "delta": delta, "s": s, "aligned": aligned,
+            "p": p,
+            "n": n,
+            "k": k,
+            "ell": ell,
+            "rho": rho,
+            "delta": delta,
+            "s": s,
+            "aligned": aligned,
             "force_at_least_one_flip": force_at_least_one_flip,
-            "instances": instances, "alphas_per_instance": alphas_per_instance
+            "instances": instances,
+            "alphas_per_instance": alphas_per_instance,
         },
         "epsilons": eps,
         "empirical": {
             "per_alpha_accept_prob": p_hat_alpha,
             "per_instance_any_alpha_rate": p_hat_any,
             "total_alpha": total_alpha,
-            "accepted_alpha": accept_alpha
-        }
+            "accepted_alpha": accept_alpha,
+        },
     }
     print(json.dumps(out, indent=2))
 
     # Human-readable summary
     print("========== SUMMARY ==========")
     print(f"delta={delta:.6g}  sqrt(rho)={math.sqrt(rho):.6g}  s=ceil((1-δ)n)={s}")
-    for tau in (4,5,6,7):
+    for tau in (4, 5, 6, 7):
         e = eps[tau]
-        e_txt = f"{e:.6g}" if e != float('inf') else "inf"
+        e_txt = f"{e:.6g}" if e != float("inf") else "inf"
         print(f"ε_{tau} = {e_txt}")
-    print(f"\nEmpirical per-alpha acceptance  p̂_acc = {p_hat_alpha:.6g} "
-          f"({accept_alpha}/{total_alpha})")
-    print(f"Empirical per-instance any-α rate = {p_hat_any:.6g} "
-          f"({per_instance_any_alpha_accept}/{instances})")
+    print(
+        f"\nEmpirical per-alpha acceptance  p̂_acc = {p_hat_alpha:.6g} "
+        f"({accept_alpha}/{total_alpha})"
+    )
+    print(
+        f"Empirical per-instance any-α rate = {p_hat_any:.6g} "
+        f"({per_instance_any_alpha_accept}/{instances})"
+    )
 
     # Compare empirical against bounds
-    # replace compare loop
     print("\n-- Comparison: is p̂_acc > ε_τ? --")
-    for tau in (4,5,6,7):
+    for tau in (4, 5, 6, 7):
         e = eps[tau]
-        vacuous = (e > 1)
+        vacuous = e > 1
         e_clamped = min(1.0, e)
-        verdict = "EXCEEDS (potentially refutes τ)" if (e_clamped < 1.0 and p_hat_alpha > e_clamped) else "≤ (within bound)"
+        verdict = (
+            "EXCEEDS (potentially refutes τ)"
+            if (e_clamped < 1.0 and p_hat_alpha > e_clamped)
+            else "≤ (within bound)"
+        )
         note = " [vacuous]" if vacuous else ""
-        print(f"τ={tau}: p̂_acc {('>' if p_hat_alpha > e_clamped else '≤')} ε_{tau}={e:.6g}{note}  ==> {verdict}")
+        print(
+            f"τ={tau}: p̂_acc {('>' if p_hat_alpha > e_clamped else '≤')} "
+            f"ε_{tau}={e:.6g}{note}  ==> {verdict}"
+        )
 
 # ---------------- CLI ----------------
 
 if __name__ == "__main__":
     import argparse
+
     ap = argparse.ArgumentParser(description="Empirical soundness test for RS-CA vs ετ bounds")
     ap.add_argument("--p", type=int, default=2147483647, help="prime field (must be prime)")
     ap.add_argument("--n", type=int, default=6, help="block length; require n | (p-1)")
@@ -298,8 +321,11 @@ if __name__ == "__main__":
     ap.set_defaults(aligned=True)
     ap.add_argument("--seed", type=int, default=None, help="PRNG seed")
     ap.add_argument("--delta", type=float, default=None, help="override δ; default: 1 - 1.01*sqrt(k/n)")
-    ap.add_argument("--no_force_flip", action="store_true",
-                    help="allow zero flips (useful when s=n); default forces ≥1 flip")
+    ap.add_argument(
+        "--no_force_flip",
+        action="store_true",
+        help="allow zero flips (useful when s=n); default forces ≥1 flip",
+    )
     args = ap.parse_args()
 
     run_soundness(

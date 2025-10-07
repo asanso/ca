@@ -23,9 +23,9 @@ def parse_alphas(arg: Optional[str], p: int) -> Optional[List[int]]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--p", type=int, default=29)
-    ap.add_argument("--n", type=int, default=14)
-    ap.add_argument("--k", type=int, default=6)
+    ap.add_argument("--p", type=int, default=257)
+    ap.add_argument("--n", type=int, default=8)
+    ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--ell", type=int, default=2)
     ap.add_argument("--tries", type=int, default=10)
     ap.add_argument("--aligned", dest="aligned", action="store_true",
