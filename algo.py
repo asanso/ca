@@ -11,21 +11,6 @@ from util import (
 )
 
 # ---------- List decoding & witnesses ----------
-
-def list_decode(y: List[int], xs: List[int], k: int, p: int, delta: float):
-    """Return threshold s and *all* RS codewords agreeing with y on ≥ s coords."""
-    n = len(xs)
-    s = math.ceil((1 - delta) * n)
-    codewords: Dict[Tuple[int, ...], int] = {}
-    for T in itertools.combinations(range(n), k):
-        coeffs = interpolate_lagrange([xs[i] for i in T], [y[i] for i in T], k, p)
-        cw = tuple(eval_poly_vector(coeffs, xs, p))
-        agree = sum(cw[i] == y[i] for i in range(n))
-        if agree > codewords.get(cw, -1):
-            codewords[cw] = agree
-    good = [cw for cw, a in codewords.items() if a >= s]
-    return s, good
-
 def best_agreement_witness(y: List[int], xs: List[int], k: int, p: int):
     n = len(xs); best = -1; best_data = None
     for T in itertools.combinations(range(n), k):

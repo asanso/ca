@@ -5,6 +5,9 @@
 import math, random
 from typing import List
 
+import itertools, math, json, random
+from typing import List, Tuple, Optional, Dict, Any, Set
+
 # ---------- Field & polynomial utils ----------
 
 def poly_eval(coeffs: List[int], x: int, p: int) -> int:
@@ -126,3 +129,17 @@ def gen_linear_combo(fs: List[List[int]], alpha: int, p: int) -> List[int]:
     ell = len(fs); n = len(fs[0])
     weights = [pow(alpha, j, p) for j in range(ell)]
     return [(sum(weights[j] * fs[j][i] for j in range(ell)) % p) for i in range(n)]
+
+def list_decode(y: List[int], xs: List[int], k: int, p: int, delta: float):
+    """Return threshold s and *all* RS codewords agreeing with y on ≥ s coords."""
+    n = len(xs)
+    s = math.ceil((1 - delta) * n)
+    codewords: Dict[Tuple[int, ...], int] = {}
+    for T in itertools.combinations(range(n), k):
+        coeffs = interpolate_lagrange([xs[i] for i in T], [y[i] for i in T], k, p)
+        cw = tuple(eval_poly_vector(coeffs, xs, p))
+        agree = sum(cw[i] == y[i] for i in range(n))
+        if agree > codewords.get(cw, -1):
+            codewords[cw] = agree
+    good = [cw for cw, a in codewords.items() if a >= s]
+    return s, good
