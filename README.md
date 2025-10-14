@@ -1,5 +1,3 @@
-⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️ **WORK IN PROGRESS** ⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
-
 # Example Usage
 
 `python3 main.py --max-pairs 1000 --stride2 100 --stride1 100`
