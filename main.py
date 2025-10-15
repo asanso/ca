@@ -12,11 +12,18 @@ For each pair (F1, F2):
     - default: proceed if (F1 is δ-far) OR (F2 is δ-far)
     - with --require-f1-far: proceed only if F1 is δ-far
   Then compute counter = |{ α in F_p : F1 + α F2 is δ-close }|.
-  If counter > E (where E = n / (ρ η), ρ=k/n, η=1-ρ-δ), print "counter > E <counter>".
-  If --verbose is enabled, print extra diagnostics per pair and iterator configuration.
+  If counter > E, print "counter > E <counter>".
+
+E/err formula (with parameters c1, c2; ignoring ℓ term):
+  rho = k/n
+  eta = 1 - rho - delta        (must be > 0)
+  Let D = --d if provided, else n
+  E   = D^c2 / (eta^c1 * rho^(c1+c2))
+  err = E / p
 
 Options (defaults in parentheses):
   --p (257), --n (8), --k (4), --delta (0.31)
+  --c1 (1), --c2 (1), --d (defaults to n)
   --require-f1-far
   Sharding/caps for both F1 and F2: --stride1/--offset1, --stride2/--offset2
   Caps: --limit1, --limit2, --max-pairs
@@ -29,7 +36,7 @@ WARNING: The FULL space is enormous (e.g., p=257, n=8 ⇒ 257^8 ≈ 1.78e19 vect
 
 import argparse
 import sys
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 from math import gcd
 
 from util import *  # expects: root_of_unity_domain, list_decode
@@ -66,11 +73,7 @@ def iterate_vectors_full(
     *,
     verbose: bool = False,
 ) -> Iterator[List[int]]:
-    """Stream vectors v in (F_p)^n by counting in base p.
-       - start: first *index* (0..p^n-1)
-       - step:  produce indices start, start+step, ...
-       - limit: if given, stop after yielding this many vectors
-    """
+    """Stream vectors v in (F_p)^n by counting in base p."""
     total = p ** n
     vprint(verbose, f"[iter/full] total={total:,} start={start} step={step} limit={limit}")
     produced = 0
@@ -94,9 +97,6 @@ def iterate_vectors_sparse(
 ) -> Iterator[List[int]]:
     """Stream vectors v in (F_p)^n with each coordinate in {2,...,p-1} (no 0s, no 1s).
        Uses a sparsified / scrambled order to avoid bunching at small symbols.
-       - start: logical start index (0..(p-2)^n-1)
-       - step:  produce indices start, start+step, ...
-       - limit: yield at most this many vectors
     """
     assert p >= 3 and n >= 1
     base = p - 2                  # digits map to values {2,...,p-1}
@@ -153,25 +153,39 @@ def iterate_vectors_sparse(
         produced += 1
         i += step
 
-def compute_E_and_err(p: int, n: int, k: int, delta: float) -> Tuple[float, float, float, float]:
+
+# ---- Parameters -> E, err ----
+def compute_E_and_err(
+    p: int,
+    n: int,
+    k: int,
+    delta: float,
+    c1: int,
+    c2: int,
+    d_override: Optional[int] = None,
+) -> Tuple[float, float, float, float, int]:
     """
     Compute:
       rho = k/n
-      eta = 1 - rho - delta     (must be > 0)
-      E   = n / (rho * eta)
+      eta = 1 - rho - delta           (must be > 0)
+      D   = d_override if given else n
+      E   = D^c2 / (eta^c1 * rho^(c1+c2))     # ignoring (ℓ-1) factor per request
       err = E / p
-    Returns (E, err, rho, eta).
-    Raises ValueError if the parameters are invalid.
+    Returns (E, err, rho, eta, D).
+    Raises ValueError on invalid inputs.
     """
     if not (0 < k < n):
         raise ValueError("Require 0 < k < n.")
+    if c1 < 1 or c2 < 1:
+        raise ValueError("Require c1 >= 1 and c2 >= 1.")
     rho = k / n
     eta = 1 - rho - delta
     if eta <= 0:
         raise ValueError(f"eta = 1 - k/n - delta must be positive; got eta={eta:.4f}.")
-    E = n / (rho * eta)
+    D = n if d_override is None else d_override
+    E = (D ** c1) / ((eta*rho)**c2)
     err = E / p
-    return E, err, rho, eta
+    return E, err, rho, eta, D
 
 
 # ---- Scan a single pair ----
@@ -212,7 +226,7 @@ def scan_pair(
 
     if counter > E:
         print("counter > E", counter)
-    vprint(verbose, f"[pair] counter={counter}  (E={E:.3f})")
+    vprint(verbose, f"[pair] counter={counter}  (E={E:.6g})")
 
     return counter
 
@@ -226,6 +240,11 @@ def main():
     ap.add_argument("--n", type=int, default=8)
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--delta", type=float, default=0.31)
+
+    # NEW: parameters for the bound (ignore ℓ)
+    ap.add_argument("--c1", type=int, default=1, help="Exponent c1 in denominator (eta^c1 * rho^(c1+c2)).")
+    ap.add_argument("--c2", type=int, default=1, help="Exponent c2; numerator uses D^c2 and rho^(c1+c2) in denom.")
+    ap.add_argument("--d",  type=int, default=None, help="D in the formula (defaults to n if omitted).")
 
     # proceed rule toggle
     ap.add_argument(
@@ -257,23 +276,25 @@ def main():
 
     args = ap.parse_args()
 
-    if not (0 < args.k < args.n):
-        raise SystemExit("Require 0 < k < n.")
     if (args.p - 1) % args.n != 0:
         raise SystemExit("Require n | (p - 1).")
 
     xs = root_of_unity_domain(args.p, args.n)
 
+    # Compute E and err via the new formula
     try:
-        E, err, rho, eta = compute_E_and_err(args.p, args.n, args.k, args.delta)
+        E, err, rho, eta, D = compute_E_and_err(
+            args.p, args.n, args.k, args.delta, args.c1, args.c2, args.d
+        )
     except ValueError as e:
         raise SystemExit(str(e))
-        
+
     space_desc = "FULL (F_p)^n" if args.i_know_what_im_doing else "{2,...,p-1}^n (scrambled)"
     print(
         f"[info] p={args.p}, n={args.n}, k={args.k}, delta={args.delta}, "
-        f"rho={rho:.3f}, eta={eta:.3f}, E={E:.1f}, err={err:.3f}"
+        f"rho={rho:.3f}, eta={eta:.3f}, c1={args.c1}, c2={args.c2}, D={D}"
     )
+    print(f"[info] E={E:.6g}, err=E/p={err:.6g}")
     print(f"[info] iterating space: {space_desc}")
 
     # Choose iterator + size depending on mode
@@ -325,7 +346,6 @@ def main():
                 print(f"[info] Reached --max-pairs={args.max_pairs}.")
                 return
 
-            # light progress trace
             if args.verbose and (pairs & ((1 << 12) - 1)) == 0:  # every 4096 pairs
                 print(f"[progress] processed pairs: {pairs:,}")
 
