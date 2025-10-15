@@ -223,7 +223,7 @@ def compute_E_and_err(
         m = min(eta_j, sqrt(rho) / 20.0)
         if m <= 0:
             raise ValueError("Internal: min(η_J, sqrt(ρ)/20) must be positive.")
-        E = (k ** 2) / ((2.0 * m) ** 7)
+        E = (n ** 2) / ((2.0 * m) ** 7)
         err = E / p
         return E, err, rho, eta_j, "theorem4.6"
     else:
