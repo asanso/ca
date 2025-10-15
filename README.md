@@ -19,3 +19,8 @@ python3 main.py --max-pairs 100000
 4. Return **win** if $\mathrm{ctr} > E$; otherwise **lose**.
 
 **Notes.** $\Delta(f, C)$ denotes the (relative) distance from $f$ to the nearest codeword in $C$.
+
+## Plotting data
+
+Running `python3 main.py --max-pairs 100 --delta=0.375 --collect-stats --stats-plot counters.png` can produce graphs like ![counters plot](img/counters.png).
+
