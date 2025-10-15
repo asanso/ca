@@ -153,6 +153,26 @@ def iterate_vectors_sparse(
         produced += 1
         i += step
 
+def compute_E_and_err(p: int, n: int, k: int, delta: float) -> Tuple[float, float, float, float]:
+    """
+    Compute:
+      rho = k/n
+      eta = 1 - rho - delta     (must be > 0)
+      E   = n / (rho * eta)
+      err = E / p
+    Returns (E, err, rho, eta).
+    Raises ValueError if the parameters are invalid.
+    """
+    if not (0 < k < n):
+        raise ValueError("Require 0 < k < n.")
+    rho = k / n
+    eta = 1 - rho - delta
+    if eta <= 0:
+        raise ValueError(f"eta = 1 - k/n - delta must be positive; got eta={eta:.4f}.")
+    E = n / (rho * eta)
+    err = E / p
+    return E, err, rho, eta
+
 
 # ---- Scan a single pair ----
 def scan_pair(
@@ -244,12 +264,11 @@ def main():
 
     xs = root_of_unity_domain(args.p, args.n)
 
-    rho = args.k / args.n
-    eta = 1 - rho - args.delta
-    if eta <= 0:
-        raise SystemExit(f"eta = 1 - k/n - delta must be positive; got eta={eta:.4f}.")
-    E = args.n / (rho * eta)
-    err = E / args.p
+    try:
+        E, err, rho, eta = compute_E_and_err(args.p, args.n, args.k, args.delta)
+    except ValueError as e:
+        raise SystemExit(str(e))
+        
     space_desc = "FULL (F_p)^n" if args.i_know_what_im_doing else "{2,...,p-1}^n (scrambled)"
     print(
         f"[info] p={args.p}, n={args.n}, k={args.k}, delta={args.delta}, "
