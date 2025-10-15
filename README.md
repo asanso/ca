@@ -1,6 +1,6 @@
 # Example Usage
 
-`python3 main.py --max-pairs 1000 --stride2 100 --stride1 100`
+`python3 main.py`
 
 **Algorithm: Threshold-count test over a code $C$**
 
