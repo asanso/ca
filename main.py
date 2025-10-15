@@ -119,6 +119,8 @@ def main():
     rho = args.k/args.n
     eta = 1 -rho - args.delta
     E = args.n/(rho*eta)
+    err = E/args.p
+    print(f"[info] p={args.p}, n={args.n}, k={args.k}, delta={args.delta}, rho={rho:.3f}, eta={eta:.3f}, E={E:.1f}, err={err:.3f}")
     # Estimate workload to guard accidental huge runs
     total_vecs = args.p ** args.n
     total1 = (total_vecs - args.offset1 + args.stride1 - 1) // args.stride1
