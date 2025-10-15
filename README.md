@@ -1,6 +1,10 @@
 # Example Usage
 
-`python3 main.py`
+```shell
+python3 main.py --max-pairs 100000     
+[info] p=257, n=8, k=4, delta=0.31, rho=0.500, eta=0.190, E=84.2, err=0.328
+[info] iterating space: {2,...,p-1}^n (scrambled)
+```
 
 **Algorithm: Threshold-count test over a code $C$**
 
