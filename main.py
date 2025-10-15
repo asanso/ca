@@ -14,16 +14,20 @@ For each pair (F1, F2):
   Then compute counter = |{ α in F_p : F1 + α F2 is δ-close }|.
   If counter > E, print "counter > E <counter>".
 
-E/err formula (with parameters c1, c2; ignoring ℓ term):
-  rho = k/n
-  eta = 1 - rho - delta        (must be > 0)
-  Let D = --d if provided, else n
-  E   = D^c2 / (eta^c1 * rho^(c1+c2))
-  err = E / p
+E / err selection:
+  Let ρ = k/n. If δ < 1 - sqrt(ρ) (the Johnson radius), use Theorem 4.6:
+      η_J = 1 - sqrt(ρ) - δ   (> 0)
+      m   = min(η_J, sqrt(ρ)/20)
+      E   = k^2 / (2*m)^7
+      err = E / |F| = E / p
+  Otherwise (δ ≥ 1 - sqrt(ρ)), use Conjecture 4.7 with user exponents c1,c2,c3:
+      η   = 1 - ρ - δ         (require η > 0, i.e., δ < 1 - ρ)
+      E   = n^{c1} / (ρ^{c2} * η^{c3})
+      err = E / p
 
 Options (defaults in parentheses):
   --p (257), --n (8), --k (4), --delta (0.31)
-  --c1 (1), --c2 (1), --d (defaults to n)
+  --c1 (1), --c2 (1), --c3 (1)      # used only in the Conjecture-4.7 regime
   --require-f1-far
   Sharding/caps for both F1 and F2: --stride1/--offset1, --stride2/--offset2
   Caps: --limit1, --limit2, --max-pairs
@@ -37,7 +41,7 @@ WARNING: The FULL space is enormous (e.g., p=257, n=8 ⇒ 257^8 ≈ 1.78e19 vect
 import argparse
 import sys
 from typing import Iterator, List, Optional, Tuple
-from math import gcd
+from math import gcd, sqrt
 
 from util import *  # expects: root_of_unity_domain, list_decode
 
@@ -154,7 +158,7 @@ def iterate_vectors_sparse(
         i += step
 
 
-# ---- Parameters -> E, err ----
+# ---- Parameters -> E, err (Theorem 4.6 vs Conjecture 4.7) ----
 def compute_E_and_err(
     p: int,
     n: int,
@@ -162,30 +166,54 @@ def compute_E_and_err(
     delta: float,
     c1: int,
     c2: int,
-    d_override: Optional[int] = None,
-) -> Tuple[float, float, float, float, int]:
+    c3: int,
+) -> Tuple[float, float, float, float, str]:
     """
-    Compute:
-      rho = k/n
-      eta = 1 - rho - delta           (must be > 0)
-      D   = d_override if given else n
-      E   = D^c2 / (eta^c1 * rho^(c1+c2))     # ignoring (ℓ-1) factor per request
-      err = E / p
-    Returns (E, err, rho, eta, D).
-    Raises ValueError on invalid inputs.
+    Selects formula based on δ vs. Johnson radius 1 - sqrt(ρ).
+
+    Returns:
+      E, err, rho, eta_like, regime
+
+    - If δ < 1 - sqrt(ρ): regime="theorem4.6"
+        eta_like = η_J = 1 - sqrt(ρ) - δ
+        E   = k^2 / (2*min(η_J, sqrt(ρ)/20))^7
+        err = E / p
+    - Else: regime="conj4.7"
+        eta_like = η = 1 - ρ - δ  (must be > 0)
+        E   = n^{c1} / (ρ^{c2} * η^{c3})
+        err = E / p
     """
     if not (0 < k < n):
         raise ValueError("Require 0 < k < n.")
-    if c1 < 1 or c2 < 1:
-        raise ValueError("Require c1 >= 1 and c2 >= 1.")
+    if min(c1, c2, c3) < 0:
+        raise ValueError("Require c1, c2, c3 >= 0.")
+
     rho = k / n
-    eta = 1 - rho - delta
-    if eta <= 0:
-        raise ValueError(f"eta = 1 - k/n - delta must be positive; got eta={eta:.4f}.")
-    D = n if d_override is None else d_override
-    E = (D ** c1) / ((eta*rho)**c2)
-    err = E / p
-    return E, err, rho, eta, D
+    johnson = 1.0 - sqrt(rho)
+
+    if delta < johnson:
+        print("johnson regime")
+        eta_j = 1.0 - sqrt(rho) - delta
+        print(f"eta_j: {eta_j}")
+        print(sqrt(rho) / 20.0)
+        if eta_j <= 0:
+            raise ValueError(f"η_J must be positive in theorem-4.6 regime; got η_J={eta_j:.4f}.")
+        m = min(eta_j, sqrt(rho) / 20.0)
+        print(m)
+        if m <= 0:
+            raise ValueError("Internal: min(η_J, sqrt(ρ)/20) must be positive.")
+        E = (k ** 2) / ((2.0 * m) ** 7)
+        err = E / p
+        return E, err, rho, eta_j, "theorem4.6"
+    else:
+        eta = 1.0 - rho - delta
+        if eta <= 0:
+            raise ValueError(
+                f"eta = 1 - k/n - delta must be positive in conjecture-4.7 regime; got eta={eta:.4f}."
+            )
+        E = (n ** c1) / ((rho ** c2) * (eta ** c3))
+        err = E / p
+        return E, err, rho, eta, "conj4.7"
 
 
 # ---- Scan a single pair ----
@@ -241,10 +269,10 @@ def main():
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--delta", type=float, default=0.31)
 
-    # NEW: parameters for the bound (ignore ℓ)
-    ap.add_argument("--c1", type=int, default=1, help="Exponent c1 in denominator (eta^c1 * rho^(c1+c2)).")
-    ap.add_argument("--c2", type=int, default=1, help="Exponent c2; numerator uses D^c2 and rho^(c1+c2) in denom.")
-    ap.add_argument("--d",  type=int, default=None, help="D in the formula (defaults to n if omitted).")
+    # Conjecture 4.7 exponents (used when δ ≥ 1 - sqrt(ρ))
+    ap.add_argument("--c1", type=int, default=1, help="Exponent on n in Conjecture 4.7.")
+    ap.add_argument("--c2", type=int, default=1, help="Exponent on ρ in Conjecture 4.7 (in denominator).")
+    ap.add_argument("--c3", type=int, default=1, help="Exponent on η in Conjecture 4.7 (in denominator).")
 
     # proceed rule toggle
     ap.add_argument(
@@ -281,19 +309,25 @@ def main():
 
     xs = root_of_unity_domain(args.p, args.n)
 
-    # Compute E and err via the new formula
+    # Compute E and err using Theorem 4.6 (if δ < 1 - sqrt(ρ)) or Conjecture 4.7 (otherwise)
     try:
-        E, err, rho, eta, D = compute_E_and_err(
-            args.p, args.n, args.k, args.delta, args.c1, args.c2, args.d
+        E, err, rho, eta_like, regime = compute_E_and_err(
+            args.p, args.n, args.k, args.delta, args.c1, args.c2, args.c3
         )
     except ValueError as e:
         raise SystemExit(str(e))
 
+    johnson = 1.0 - sqrt(rho)
     space_desc = "FULL (F_p)^n" if args.i_know_what_im_doing else "{2,...,p-1}^n (scrambled)"
     print(
         f"[info] p={args.p}, n={args.n}, k={args.k}, delta={args.delta}, "
-        f"rho={rho:.3f}, eta={eta:.3f}, c1={args.c1}, c2={args.c2}, D={D}"
+        f"rho={rho:.3f}, Johnson(1-sqrt(rho))={johnson:.3f}"
     )
+    if regime == "theorem4.6":
+        print(f"[info] regime=Theorem 4.6, eta_J={eta_like:.3f}")
+    else:
+        # eta_like is η in this branch
+        print(f"[info] regime=Conjecture 4.7, c1={args.c1}, c2={args.c2}, c3={args.c3}, eta={eta_like:.3f}")
     print(f"[info] E={E:.6g}, err=E/p={err:.6g}")
     print(f"[info] iterating space: {space_desc}")
 
