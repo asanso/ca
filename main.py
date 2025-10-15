@@ -12,7 +12,8 @@ For each pair (F1, F2):
     - default: proceed if (F1 is δ-far) OR (F2 is δ-far)
     - with --require-f1-far: proceed only if F1 is δ-far
   Then compute counter = |{ α in F_p : F1 + α F2 is δ-close }|.
-  Print counter; if counter > E (where E = n / (ρ η), ρ=k/n, η=1-ρ-δ), also print "counter > E".
+  If counter > E (where E = n / (ρ η), ρ=k/n, η=1-ρ-δ), print "counter > E <counter>".
+  If --verbose is enabled, print extra diagnostics per pair and iterator configuration.
 
 Options (defaults in parentheses):
   --p (257), --n (8), --k (4), --delta (0.31)
@@ -20,23 +21,31 @@ Options (defaults in parentheses):
   Sharding/caps for both F1 and F2: --stride1/--offset1, --stride2/--offset2
   Caps: --limit1, --limit2, --max-pairs
   Safety switch: --i-know-what-im-doing  (enables FULL space traversal)
+  Verbose logging: -v / --verbose
 
 WARNING: The FULL space is enormous (e.g., p=257, n=8 ⇒ 257^8 ≈ 1.78e19 vectors; pairs ≈ 1e38).
          Use sharding/caps.
 """
 
 import argparse
-import math
 import sys
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Iterator, List, Optional
 from math import gcd
 
 from util import *  # expects: root_of_unity_domain, list_decode
+
+
+# ---- Utility ----
+def vprint(verbose: bool, *args, **kwargs):
+    if verbose:
+        print(*args, **kwargs)
+
 
 # ---- Closeness ----
 def is_delta_close(y: List[int], xs: List[int], k: int, p: int, delta: float) -> bool:
     _, good = list_decode(y, xs, k, p, delta)
     return len(good) > 0
+
 
 # ---- Enumerating all vectors ----
 def index_to_vector(idx: int, p: int, n: int) -> List[int]:
@@ -47,14 +56,23 @@ def index_to_vector(idx: int, p: int, n: int) -> List[int]:
         idx //= p
     return v
 
-def iterate_vectors_full(p: int, n: int, start: int = 0, step: int = 1,
-                         limit: Optional[int] = None) -> Iterator[List[int]]:
+
+def iterate_vectors_full(
+    p: int,
+    n: int,
+    start: int = 0,
+    step: int = 1,
+    limit: Optional[int] = None,
+    *,
+    verbose: bool = False,
+) -> Iterator[List[int]]:
     """Stream vectors v in (F_p)^n by counting in base p.
        - start: first *index* (0..p^n-1)
        - step:  produce indices start, start+step, ...
        - limit: if given, stop after yielding this many vectors
     """
     total = p ** n
+    vprint(verbose, f"[iter/full] total={total:,} start={start} step={step} limit={limit}")
     produced = 0
     idx = start % total
     while idx < total:
@@ -64,8 +82,16 @@ def iterate_vectors_full(p: int, n: int, start: int = 0, step: int = 1,
         produced += 1
         idx += step
 
-def iterate_vectors_sparse(p: int, n: int, start: int = 0, step: int = 1,
-                           limit: Optional[int] = None) -> Iterator[List[int]]:
+
+def iterate_vectors_sparse(
+    p: int,
+    n: int,
+    start: int = 0,
+    step: int = 1,
+    limit: Optional[int] = None,
+    *,
+    verbose: bool = False,
+) -> Iterator[List[int]]:
     """Stream vectors v in (F_p)^n with each coordinate in {2,...,p-1} (no 0s, no 1s).
        Uses a sparsified / scrambled order to avoid bunching at small symbols.
        - start: logical start index (0..(p-2)^n-1)
@@ -96,6 +122,13 @@ def iterate_vectors_sparse(p: int, n: int, start: int = 0, step: int = 1,
         m_pos.append(next_coprime(base, 2 * pos + 1))
         o_pos.append((pos * (pos + 3) + 7) % base)
 
+    vprint(
+        verbose,
+        f"[iter/sparse] base={base} total={total:,} start={start} step={step} limit={limit}\n"
+        f"[iter/sparse] perm a={a}, c={c}\n"
+        f"[iter/sparse] first multipliers={m_pos[:min(8,n)]}, first offsets={o_pos[:min(8,n)]}",
+    )
+
     produced = 0
     i = start % total
     while i < total:
@@ -120,9 +153,20 @@ def iterate_vectors_sparse(p: int, n: int, start: int = 0, step: int = 1,
         produced += 1
         i += step
 
+
 # ---- Scan a single pair ----
-def scan_pair(F1: List[int], F2: List[int], xs: List[int], p: int, k: int, delta: float, E: float,
-              require_f1_far: bool = False) -> int:
+def scan_pair(
+    F1: List[int],
+    F2: List[int],
+    xs: List[int],
+    p: int,
+    k: int,
+    delta: float,
+    E: float,
+    *,
+    require_f1_far: bool = False,
+    verbose: bool = False,
+) -> int:
     if not (len(F1) == len(F2) == len(xs)):
         raise ValueError("F1, F2, xs must have length n.")
     F1_close = is_delta_close(F1, xs, k, p, delta)
@@ -135,7 +179,10 @@ def scan_pair(F1: List[int], F2: List[int], xs: List[int], p: int, k: int, delta
         proceed = not (F1_close and F2_close)
 
     if not proceed:
+        vprint(verbose, f"[pair] skipped: F1_close={F1_close}, F2_close={F2_close}")
         return 0
+
+    vprint(verbose, f"[pair] proceeding: F1_close={F1_close}, F2_close={F2_close}")
 
     counter = 0
     for alpha in range(p):
@@ -144,20 +191,28 @@ def scan_pair(F1: List[int], F2: List[int], xs: List[int], p: int, k: int, delta
             counter += 1
 
     if counter > E:
-        print("counter > E ", counter)
+        print("counter > E", counter)
+    vprint(verbose, f"[pair] counter={counter}  (E={E:.3f})")
+
     return counter
+
 
 # ---- Driver ----
 def main():
-    ap = argparse.ArgumentParser(description="Scan F1,F2 pairs with sharding/limits. Default iterates {2,...,p-1}^n; pass --i-know-what-im-doing for FULL (F_p)^n.")
+    ap = argparse.ArgumentParser(
+        description="Scan F1,F2 pairs with sharding/limits. Default iterates {2,...,p-1}^n; pass --i-know-what-im-doing for FULL (F_p)^n."
+    )
     ap.add_argument("--p", type=int, default=257)
     ap.add_argument("--n", type=int, default=8)
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--delta", type=float, default=0.31)
 
     # proceed rule toggle
-    ap.add_argument("--require-f1-far", action="store_true",
-                    help="Proceed only if F1 is δ-far (instead of (F1 far) OR (F2 far)).")
+    ap.add_argument(
+        "--require-f1-far",
+        action="store_true",
+        help="Proceed only if F1 is δ-far (instead of (F1 far) OR (F2 far)).",
+    )
 
     # sharding for F1 and F2 spaces
     ap.add_argument("--stride1", type=int, default=1, help="stride over indices for F1")
@@ -171,8 +226,14 @@ def main():
     ap.add_argument("--max-pairs", type=int, default=None, help="stop after this many pairs")
 
     # safety switch: toggles FULL space traversal
-    ap.add_argument("--i-know-what-im-doing", action="store_true",
-                    help="Enable FULL (F_p)^n traversal. Without this, iterate only over {2,...,p-1}^n in scrambled order.")
+    ap.add_argument(
+        "--i-know-what-im-doing",
+        action="store_true",
+        help="Enable FULL (F_p)^n traversal. Without this, iterate only over {2,...,p-1}^n in scrambled order.",
+    )
+
+    # verbosity
+    ap.add_argument("-v", "--verbose", action="store_true", help="Enable verbose diagnostics.")
 
     args = ap.parse_args()
 
@@ -190,7 +251,10 @@ def main():
     E = args.n / (rho * eta)
     err = E / args.p
     space_desc = "FULL (F_p)^n" if args.i_know_what_im_doing else "{2,...,p-1}^n (scrambled)"
-    print(f"[info] p={args.p}, n={args.n}, k={args.k}, delta={args.delta}, rho={rho:.3f}, eta={eta:.3f}, E={E:.1f}, err={err:.3f}")
+    print(
+        f"[info] p={args.p}, n={args.n}, k={args.k}, delta={args.delta}, "
+        f"rho={rho:.3f}, eta={eta:.3f}, E={E:.1f}, err={err:.3f}"
+    )
     print(f"[info] iterating space: {space_desc}")
 
     # Choose iterator + size depending on mode
@@ -205,17 +269,49 @@ def main():
     est_pairs = eff1 * eff2
 
     if args.max_pairs is None and est_pairs > 1e7 and not args.i_know_what_im_doing:
-        sys.exit(f"Refusing to launch a scan of ~{est_pairs:.2e} pairs without --max-pairs or --i-know-what-im-doing.")
+        sys.exit(
+            f"Refusing to launch a scan of ~{est_pairs:.2e} pairs without --max-pairs or --i-know-what-im-doing."
+        )
+
+    vprint(
+        args.verbose,
+        f"[info] shard1: offset={args.offset1} stride={args.stride1} limit={args.limit1} (eff ~ {eff1:,})",
+    )
+    vprint(
+        args.verbose,
+        f"[info] shard2: offset={args.offset2} stride={args.stride2} limit={args.limit2} (eff ~ {eff2:,})",
+    )
+    vprint(args.verbose, f"[info] estimated pairs: {est_pairs:,}")
 
     pairs = 0
-    for F1 in iter_fn(args.p, args.n, start=args.offset1, step=args.stride1, limit=args.limit1):
-        for F2 in iter_fn(args.p, args.n, start=args.offset2, step=args.stride2, limit=args.limit2):
-            scan_pair(F1, F2, xs, args.p, args.k, args.delta, E, require_f1_far=args.require_f1_far)
+    for F1 in iter_fn(
+        args.p, args.n, start=args.offset1, step=args.stride1, limit=args.limit1, verbose=args.verbose
+    ):
+        for F2 in iter_fn(
+            args.p, args.n, start=args.offset2, step=args.stride2, limit=args.limit2, verbose=args.verbose
+        ):
+            scan_pair(
+                F1,
+                F2,
+                xs,
+                args.p,
+                args.k,
+                args.delta,
+                E,
+                require_f1_far=args.require_f1_far,
+                verbose=args.verbose,
+            )
             pairs += 1
             if args.max_pairs is not None and pairs >= args.max_pairs:
                 print(f"[info] Reached --max-pairs={args.max_pairs}.")
                 return
+
+            # light progress trace
+            if args.verbose and (pairs & ((1 << 12) - 1)) == 0:  # every 4096 pairs
+                print(f"[progress] processed pairs: {pairs:,}")
+
     print(f"[info] Completed {pairs} pairs.")
+
 
 if __name__ == "__main__":
     main()
