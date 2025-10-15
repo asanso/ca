@@ -8,7 +8,7 @@ from typing import Set
 
 def genPrimes(limit: int) -> Set[int]:
     """
-    basic implementation of the Sieve of Eratosthenes
+    Basic implementation of the Sieve of Eratosthenes.
     """
     primes = {2}
     is_prime = [True] * (limit + 1)
