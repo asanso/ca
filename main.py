@@ -6,6 +6,7 @@ Scan F1, F2 over an ambient space and count alphas making F1 + α F2 δ-close to
 Modes (picked automatically):
 - DEFAULT (safe): iterate only over {2,...,p-1}^n using a scrambled order (avoids 0s/1s and bunching).
 - FULL (huge): when --i-know-what-im-doing is passed, iterate over the FULL space (F_p)^n in base-p order.
+- AUTO-FULL (small): if (p^n) <= --full-threshold, iterate FULL even without --i-know-what-im-doing.
 
 For each pair (F1, F2):
   Proceed rule:
@@ -38,6 +39,7 @@ WARNING: FULL space is enormous (e.g., p=257, n=8 ⇒ 257^8 ≈ 1.78e19 vectors;
 import argparse
 import csv
 import sys
+import time
 from collections import Counter
 from math import gcd, sqrt
 from typing import Iterator, List, Optional, Tuple
@@ -201,7 +203,7 @@ def compute_E_and_err(
 
     - If δ < 1 - sqrt(ρ): regime="theorem4.6"
         eta_like = η_J = 1 - sqrt(ρ) - δ
-        E = k^2 / (2*min(η_J, sqrt(ρ)/20))^7
+        E = k^2 / ((2*min(η_J, sqrt(ρ)/20))^7)
         err = E / p
     - Else: regime="conj4.7"
         eta_like = η = 1 - ρ - δ  (must be > 0)
@@ -353,7 +355,12 @@ def scan_pair(
     require_f1_far: bool = False,
     verbose: bool = False,
     stats: Optional[CounterStats] = None,
-) -> int:
+) -> Tuple[int, int]:
+    """
+    Returns:
+      counter, attempts
+    where attempts = number of alpha values evaluated (0 if pair skipped).
+    """
     if not (len(F1) == len(F2) == len(xs)):
         raise ValueError("F1, F2, xs must have length n.")
     F1_close = is_delta_close(F1, xs, k, p, delta)
@@ -367,7 +374,7 @@ def scan_pair(
 
     if not proceed:
         vprint(verbose, f"[pair] skipped: F1_close={F1_close}, F2_close={F2_close}")
-        return 0
+        return 0, 0
 
     vprint(verbose, f"[pair] proceeding: F1_close={F1_close}, F2_close={F2_close}")
 
@@ -384,7 +391,7 @@ def scan_pair(
     if stats is not None:
         stats.add(counter, E)
 
-    return counter
+    return counter, p  # p alpha values were tested when proceeding
 
 
 # ---- Driver ----
@@ -420,6 +427,9 @@ def main():
     # safety switch: toggles FULL space traversal
     ap.add_argument("--i-know-what-im-doing", action="store_true",
                     help="Enable FULL (F_p)^n traversal. Without this, iterate only over {2,...,p-1}^n in scrambled order.")
+    ap.add_argument("--full-threshold", type=int, default=1_000_000,
+                    help="If (p^n) <= this value, automatically iterate FULL (F_p)^n even without --i-know-what-im-doing. "
+                         "Set to 0 to disable auto-FULL.")
 
     # verbosity
     ap.add_argument("-v", "--verbose", action="store_true", help="Enable verbose diagnostics.")
@@ -446,7 +456,11 @@ def main():
         raise SystemExit(str(e))
 
     johnson = 1.0 - sqrt(rho)
-    space_desc = "FULL (F_p)^n" if args.i_know_what_im_doing else "{2,...,p-1}^n (scrambled)"
+
+    # Decide space/iterator: FULL if explicitly requested OR auto-FULL threshold allows
+    use_full = args.i_know_what_im_doing or (args.full_threshold > 0 and (args.p ** args.n) <= args.full_threshold)
+    space_desc = "FULL (F_p)^n" if use_full else "{2,...,p-1}^n (scrambled)"
+
     print(
         f"[info] p={args.p}, n={args.n}, k={args.k}, delta={args.delta}, "
         f"rho={rho:.3f}, Johnson(1-sqrt(rho))={johnson:.3f}"
@@ -459,8 +473,8 @@ def main():
     print(f"[info] iterating space: {space_desc}")
 
     # iterator + size
-    iter_fn = iterate_vectors_full if args.i_know_what_im_doing else iterate_vectors_sparse
-    total_vecs = (args.p ** args.n) if args.i_know_what_im_doing else ((args.p - 2) ** args.n)
+    iter_fn = iterate_vectors_full if use_full else iterate_vectors_sparse
+    total_vecs = (args.p ** args.n) if use_full else ((args.p - 2) ** args.n)
 
     # workload estimate
     total1 = (total_vecs - args.offset1 + args.stride1 - 1) // args.stride1
@@ -469,7 +483,7 @@ def main():
     eff2 = total2 if args.limit2 is None else min(total2, args.limit2)
     est_pairs = eff1 * eff2
 
-    if args.max_pairs is None and est_pairs > 1e7 and not args.i_know_what_im_doing:
+    if args.max_pairs is None and est_pairs > 1e7 and not use_full:
         sys.exit(
             f"Refusing to launch a scan of ~{est_pairs:.2e} pairs without --max-pairs or --i-know-what-im-doing."
         )
@@ -487,16 +501,25 @@ def main():
         E=E, err=err, space_desc=space_desc
     )
 
+    # Run counters and timer
     pairs = 0
+    proceeded_pairs = 0
+    alpha_attempts = 0
+    t0 = time.perf_counter()
+
     for F1 in iter_fn(args.p, args.n, start=args.offset1, step=args.stride1, limit=args.limit1, verbose=args.verbose):
         for F2 in iter_fn(args.p, args.n, start=args.offset2, step=args.stride2, limit=args.limit2, verbose=args.verbose):
-            scan_pair(
+            counter, attempts = scan_pair(
                 F1, F2, xs, args.p, args.k, args.delta, E,
                 require_f1_far=args.require_f1_far,
                 verbose=args.verbose,
                 stats=stats,
             )
             pairs += 1
+            if attempts > 0:
+                proceeded_pairs += 1
+                alpha_attempts += attempts
+
             if args.max_pairs is not None and pairs >= args.max_pairs:
                 print(f"[info] Reached --max-pairs={args.max_pairs}.")
                 # finalize stats before returning
@@ -509,6 +532,12 @@ def main():
                     if args.stats_plot:
                         stats.plot(args.stats_plot, show_cdf=args.stats_cdf, info_text=plot_info, E=E)
                         print(f"[stats] saved plot to {args.stats_plot}")
+
+                elapsed = time.perf_counter() - t0
+                rate_pairs = pairs / elapsed if elapsed > 0 else 0.0
+                rate_alpha = alpha_attempts / elapsed if elapsed > 0 else 0.0
+                print(f"[run] elapsed_sec={elapsed:.3f}  pairs={pairs:,} (proceeded={proceeded_pairs:,})  "
+                      f"alpha_attempts={alpha_attempts:,}  pairs_per_sec={rate_pairs:.2f}  alpha_per_sec={rate_alpha:.2f}")
                 return
 
             if args.verbose and (pairs & ((1 << 12) - 1)) == 0:  # every 4096 pairs
@@ -526,6 +555,13 @@ def main():
         if args.stats_plot:
             stats.plot(args.stats_plot, show_cdf=args.stats_cdf, info_text=plot_info, E=E)
             print(f"[stats] saved plot to {args.stats_plot}")
+
+    # runtime summary at end
+    elapsed = time.perf_counter() - t0
+    rate_pairs = pairs / elapsed if elapsed > 0 else 0.0
+    rate_alpha = alpha_attempts / elapsed if elapsed > 0 else 0.0
+    print(f"[run] elapsed_sec={elapsed:.3f}  pairs={pairs:,} (proceeded={proceeded_pairs:,})  "
+          f"alpha_attempts={alpha_attempts:,}  pairs_per_sec={rate_pairs:.2f}  alpha_per_sec={rate_alpha:.2f}")
 
 
 if __name__ == "__main__":
