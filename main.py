@@ -469,7 +469,7 @@ def main():
     eff2 = total2 if args.limit2 is None else min(total2, args.limit2)
     est_pairs = eff1 * eff2
 
-    if args.max_pairs is None and est_pairs > 1e7 and not args.i_know-what_im_doing:
+    if args.max_pairs is None and est_pairs > 1e7 and not args.i_know_what_im_doing:
         sys.exit(
             f"Refusing to launch a scan of ~{est_pairs:.2e} pairs without --max-pairs or --i-know-what-im-doing."
         )
