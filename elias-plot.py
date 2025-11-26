@@ -18,7 +18,7 @@ def H_q(delta, q):
 
 def delta_elias_for_rho(rho, q, tol=1e-8):
     lo, hi = 0.0, 1.0 - 1.0 / q
-    target = 1.0 - rho          # want H_q(delta) = 1 - rho
+    target = 1.0 - rho          # solve H_q(delta) = 1 - rho
     for _ in range(80):
         mid = 0.5 * (lo + hi)
         val = H_q(mid, q)
@@ -34,28 +34,30 @@ delta_elias = np.array([delta_elias_for_rho(r, q) for r in rhos])
 
 fig, ax = plt.subplots(figsize=(6, 6))
 
-# Regions (matching the screenshot colors)
+# Regions
 ax.fill_between(
     rhos, 0, delta_elias,
     color="lightgreen", alpha=0.8,
-    label="Below Elias capacity (small lists allowed)",
+    label="Below Elias capacity (small lists possible)",
 )
+
 ax.fill_between(
     rhos, delta_elias, delta_conj,
     color="lightcoral", alpha=0.6,
-    label='"Trivial" interpolation regime',
+    label="Above Elias, below δ = 1 − ρ (Elias/entropy explosion region)",
 )
+
 ax.fill_between(
     rhos, delta_conj, 1,
     color="lightgray", alpha=0.8,
-    label="Beyond δ = 1 − ρ",
+    label="Trivial interpolation regime  (δ ≥ 1 − ρ)",
 )
 
 # Curves
 ax.plot(
     rhos, delta_conj,
     color="black", linewidth=2,
-    label='"Up to capacity" conjecture line  δ = 1 − ρ',
+    label='"Up to capacity" line  δ = 1 − ρ',
 )
 ax.plot(
     rhos, delta_elias,
@@ -79,7 +81,7 @@ ax.set_xlabel("Rate ρ")
 ax.set_ylabel("Error fraction δ")
 ax.set_xlim(rho_min, rho_max)
 ax.set_ylim(0, 1.0)
-ax.set_title('"Up to capacity" conjecture vs Elias and "trivial" regimes  (q = 13)')
+ax.set_title('"Up to capacity" folklore vs Elias and trivial regimes  (q = 13)')
 ax.legend(loc="lower left", fontsize=8)
 ax.grid(alpha=0.2)
 
