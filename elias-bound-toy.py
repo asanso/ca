@@ -3,9 +3,15 @@
 #
 # Tiny RS example in the Elias-only regime.
 # Uses a refined Elias-style counting bound on the *average* list size.
+#
+# Now with CLI options:
+#   --mode   {corrupted,random}  how to sample centers y
+#   --trials N                   number of trials
+#   --seed   S                   RNG seed
 
 import math
 import random
+import argparse
 
 from util import (
     root_of_unity_domain,
@@ -26,7 +32,40 @@ def q_ary_entropy(delta: float, q: int) -> float:
     )
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Tiny RS example in the Elias-only regime."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["corrupted", "random"],
+        default="corrupted",
+        help=(
+            "How to sample centers y: "
+            "'corrupted' = RS codeword + t random errors "
+            "'random' = uniform random word in F_q^n"
+        ),
+    )
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=20,
+        help="Number of random samples / trials (default: 20).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility (default: None).",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    if args.seed is not None:
+        random.seed(args.seed)
+
     # Parameters in the "Elias-only" regime:
     #   q = 13, n = 12, k = 5  => rho = 5/12
     #   delta = 0.5           => t = 6 errors
@@ -62,25 +101,40 @@ def main():
 
     xs = root_of_unity_domain(p, n)
 
-    def sample_one():
-        """Sample one random codeword, add t errors, list-decode."""
-        coeffs = rand_poly(k, p)
-        c = eval_poly_vector(coeffs, xs, p)
+    def sample_one(mode: str):
+        """Sample one center y according to `mode`, then list-decode."""
+        t = int(delta * n)
 
-        t = int(delta * n)  # here exactly 6 errors
-        flips = random.sample(range(n), t)
-        y = c[:]
-        for i in flips:
-            # add a random non-zero error
-            y[i] = (y[i] + 1 + random.randrange(p - 1)) % p
+        if mode == "corrupted":
+            # Sample random codeword and corrupt t positions
+            coeffs = rand_poly(k, p)
+            c = eval_poly_vector(coeffs, xs, p)
+
+            flips = random.sample(range(n), t)
+            y = c[:]
+            for i in flips:
+                # add a random non-zero error
+                y[i] = (y[i] + 1 + random.randrange(p - 1)) % p
+
+        elif mode == "random":
+            # Sample y uniformly from F_p^n
+            y = [random.randrange(p) for _ in range(n)]
+
+        else:
+            raise ValueError(f"Unknown mode: {mode!r}")
 
         s, good = list_decode(y, xs, k, p, delta)
         return s, len(good)
 
+    print(
+        "Sampling centers y with mode ="
+        f" '{args.mode}'  (trials = {args.trials}, seed = {args.seed})"
+    )
+    print("Random centers and their list sizes:")
+
     sizes = []
-    print("Random corrupted codewords and their list sizes:")
-    for trial in range(20):
-        s, L = sample_one()
+    for trial in range(args.trials):
+        s, L = sample_one(args.mode)
         sizes.append(L)
         print(f"  trial {trial:2d}: s = {s}, distance ≤ {n - s}, list size = {L}")
 
