@@ -1,156 +1,50 @@
+mod code;
 mod field;
+mod hamming;
 mod mat;
 
 use {
     crate::{
+        code::Code,
         field::{Field, Fu8},
+        hamming::{HammingIter, dist, weight},
         mat::Mat,
     },
     core::{
         array,
-        fmt::Debug,
         sync::atomic::{AtomicUsize, Ordering},
     },
-    num_traits::{ConstZero, Zero},
+    num_traits::{ConstZero, FromPrimitive, ToPrimitive},
     rand::{
         Rng,
         distr::{Distribution, StandardUniform},
     },
+    std::{collections::HashMap, usize},
 };
 
-pub type F13 = Fu8<13>;
-
-fn weight<T: Zero, const N: usize>(a: [T; N]) -> usize {
-    let mut w = 0;
-    for i in 0..N {
-        if !a[i].is_zero() {
-            w += 1;
-        }
-    }
-    w
-}
-
-fn dist<T: Eq, const N: usize>(a: [T; N], b: [T; N]) -> usize {
-    let mut d = 0;
-    for i in 0..N {
-        if a[i] != b[i] {
-            d += 1;
-        }
-    }
-    d
-}
-
-pub struct ErrorIter<F: Field, const N: usize>
-where
-    StandardUniform: Distribution<F>,
-{
-    pub max_weight: usize,
-    pub index:      usize,
-    pub weight:     usize,
-    pub current:    [F; N],
-}
-
-impl<F: Field, const N: usize> ErrorIter<F, N>
-where
-    StandardUniform: Distribution<F>,
-{
-    pub fn new(max_weight: usize) -> Self {
-        Self {
-            max_weight,
-            index: 0,
-            weight: 0,
-            current: [F::ZERO; N],
-        }
-    }
-}
-
-impl<F: Field, const N: usize> Iterator for ErrorIter<F, N>
-where
-    StandardUniform: Distribution<F>,
-{
-    type Item = [F; N];
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index == N {
-            return None;
-        }
-        let val = self.current;
-        loop {
-            if self.weight == self.max_weight && self.current[self.index] == F::ZERO {
-                // Skip to next index
-                self.index += 1;
-                if self.index == N {
-                    break;
-                }
-                continue;
-            }
-            // Increment current
-            if self.current[self.index] == F::ZERO {
-                self.weight += 1;
-            }
-            self.current[self.index] += F::ONE;
-            if self.current[self.index] == F::ZERO {
-                // Wrapped around
-                self.weight -= 1;
-                self.index += 1;
-                if self.index == N {
-                    break;
-                }
-                continue;
-            } else {
-                self.index = 0;
-                break;
-            }
-        }
-        Some(val)
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-struct Code<F: Field, const N: usize, const K: usize>
-where
-    StandardUniform: Distribution<F>,
-{
-    generator_matrix: Mat<F, N, K>,
-}
-
-impl<F: Field, const N: usize, const K: usize> Code<F, N, K>
-where
-    StandardUniform: Distribution<F>,
-{
-    const REDUNDANCY: usize = N - K;
-
-    fn new_reed_solomon(eval_points: [F; N]) -> Self {
-        Self {
-            generator_matrix: Mat::vandermonde(eval_points),
-        }
-    }
-
-    fn new(generator_matrix: Mat<F, N, K>) -> Self {
-        Self { generator_matrix }
-    }
-
-    fn rate(&self) -> f64 {
-        K as f64 / N as f64
-    }
-
-    fn encode(&self, message: [F; K]) -> [F; N] {
-        self.generator_matrix * message
-    }
-}
-
-impl<F: Field, const N: usize, const K: usize> Debug for Code<F, N, K>
-where
-    StandardUniform: Distribution<F>,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "({N}, {K}) ρ={} Linear Code with generator matrix:",
-            self.rate()
-        )?;
-        Ok(())
-    }
+#[macro_export]
+macro_rules! const_for {
+    ($C:ident in [$($n:expr),*] $x:block) => {
+        $({
+            const $C: usize = $n;
+            $x
+        })*
+    };
+    ($C:ident in SIZES $x:block) => {
+        $crate::const_for!($C in [0] $x);
+        $crate::const_for!($C in NON_ZERO $x);
+    };
+    ($C:ident in NON_ZERO $x:block) => {
+        $crate::const_for!($C in [1, 2, 63, 64, 65, 127, 128, 129, 256, 384, 512, 4096] $x);
+    };
+    ($C:ident in BENCH $x:block) => {
+        $crate::const_for!($C in [64, 128, 192, 256, 384, 512, 4096] $x);
+    };
+    ($C:ident in $S:tt if $($t:tt)*) => {
+        $crate::const_for!($C in $S {
+            if $($t)*
+        });
+    };
 }
 
 fn random_trial<F: Field, const N: usize>(codewords: &[[F; N]])
@@ -164,8 +58,8 @@ where
         let mut rng = rand::rng();
         let mut count = vec![0usize; N + 1];
         loop {
-            // Pick a random codeword
-            let received: [F; N] = array::from_fn(|i| rng.random());
+            // Pick a random word
+            let received: [F; N] = array::from_fn(|_| rng.random());
 
             // List decode (all codewords within distance 3)
             count.fill(0);
@@ -206,40 +100,201 @@ where
     });
 }
 
-fn main() {
-    println!("");
-    for error in ErrorIter::<F13, 5>::new(2) {
-        println!("{:?} Weight: {}", error, weight(error));
+/// Distrogram: number of codewords at distance d for d=0..=N
+pub fn distogram<F: Field, const N: usize, const K: usize, const R: usize>(
+    code: &Code<F, N, K, R>,
+    word: [F; N],
+) -> Vec<usize>
+where
+    StandardUniform: Distribution<F>,
+{
+    let mut distogram = vec![0usize; N + 1];
+    for codeword in code.codewords() {
+        let d = dist(codeword, word);
+        distogram[d] += 1;
     }
+    distogram
+}
 
-    return;
-
-    println!("Generating code:");
-    let roots = [1, 2, 4, 8, 3, 6, 12, 11, 9, 5, 10, 7].map(F13::from);
-    let rs: Code<F13, 12, 6> = Code::new_reed_solomon(roots);
-    println!("{rs:?}");
-
-    println!("Computing codewords:");
-    let mut codewords = Vec::with_capacity(13_usize.pow(6));
-    for i in 0_u64..(13_u64.pow(6)) {
-        let message = array::from_fn({
-            let mut x = i;
-            move |_i| {
-                let element = F13::from((x % 13) as u8);
-                x /= 13;
-                element
+pub fn max_distances<F: Field, const N: usize, const K: usize, const R: usize>(
+    code: &Code<F, N, K, R>,
+) -> Vec<usize>
+where
+    StandardUniform: Distribution<F>,
+{
+    let mut max_count = vec![0usize; N + 1];
+    for word in HammingIter::<F, N>::new(N) {
+        let mut count = vec![0usize; N + 1];
+        for codeword in code.codewords() {
+            let d = dist(codeword, word);
+            count[d] += 1;
+        }
+        // Cumulative sum to get all codewords within distance <= d
+        for i in 1..count.len() {
+            count[i] += count[i - 1];
+        }
+        for (i, (max, count)) in max_count.iter_mut().zip(count.iter()).enumerate() {
+            if *count > *max {
+                *max = *count;
+                // println!(
+                //     "New maximum for distance {i}: {} codewords. Word:
+                // {:?}",     *count, word
+                // );
             }
-        });
-
-        let codeword = rs.encode(message);
-        codewords.push(codeword);
+        }
     }
+    max_count
+}
 
-    codewords.sort();
-    let prev = codewords.len();
-    codewords.dedup();
-    assert_eq!(prev, codewords.len(), "Duplicate codewords!");
-    println!("{} Codewords generated.", codewords.len());
+pub fn mds_weights_fomula(q: usize, n: usize, k: usize) -> Vec<usize> {
+    (0..=n)
+        .map(|w| {
+            let d = n - k + 1;
+            if w == 0 {
+                return 1;
+            }
+            if w < d {
+                return 0;
+            }
+            let mut sum = 0usize;
+            for i in 0..=(w - d) {
+                let coeff = binomial_coeff(w - 1, i) * q.pow((w - d - i) as u32);
+                if i.is_multiple_of(2) {
+                    sum += coeff;
+                } else {
+                    sum -= coeff;
+                }
+            }
+            sum * binomial_coeff(n, w) * (q - 1)
+        })
+        .collect()
+}
 
-    random_trial(&codewords);
+pub fn print_code<F: Field, const N: usize, const K: usize, const R: usize>(code: &Code<F, N, K, R>)
+where
+    StandardUniform: Distribution<F>,
+{
+    let weights = code.weights();
+
+    let weights_formula = mds_weights_fomula(F::MODULUS.to_usize().unwrap(), N, K);
+    let weights_formula2 = mds_weights_fomula(F::MODULUS.to_usize().unwrap(), N - 1, K - 1);
+    let weights_formula3 = mds_weights_fomula(F::MODULUS.to_usize().unwrap(), N - 1, K);
+    println!("Weights formula:    {weights_formula:?} {weights_formula2:?} {weights_formula3:?}");
+
+    for codeword in code.codewords() {
+        let sizes = distogram(&code, codeword);
+        assert_eq!(weights, sizes);
+    }
+    println!("Weights count:     {weights:?}");
+
+    let mut spectra: HashMap<Vec<usize>, usize> = HashMap::new();
+    for word in HammingIter::<F, N>::new(N) {
+        let sizes = distogram(&code, word);
+        *spectra.entry(sizes).or_default() += 1;
+    }
+    println!("Spectra count");
+
+    // Sort spectra
+    let mut spectra_list_max = vec![0usize; N + 1];
+    let mut spectra: Vec<(Vec<usize>, usize)> = spectra.into_iter().collect();
+    spectra.sort_by(|a, b| b.0.cmp(&a.0));
+    for (spectrum, count) in spectra {
+        println!("  {spectrum:?}: {count}");
+
+        let mut cummulative = spectrum.clone();
+        for i in 1..cummulative.len() {
+            cummulative[i] += cummulative[i - 1];
+        }
+        for (max, count) in spectra_list_max.iter_mut().zip(cummulative.iter()) {
+            if *count > *max {
+                *max = *count;
+            }
+        }
+    }
+    println!("Spectral maximum: {spectra_list_max:?}");
+
+    let max_count = max_distances(code);
+    println!("Empirical maximum: {max_count:?}");
+}
+
+pub fn binomial_coeff(n: usize, k: usize) -> usize {
+    if k > n {
+        return 0;
+    }
+    let mut result = 1usize;
+    for i in 0..k {
+        result *= n - i;
+        assert!(result.is_multiple_of(i + 1));
+        result /= i + 1;
+    }
+    result
+}
+
+pub fn analyze<F: Field, const N: usize, const K: usize, const R: usize>()
+where
+    StandardUniform: Distribution<F>,
+{
+    let roots = array::from_fn(|i| F::from(F::UInt::from_usize(i).unwrap()));
+    let code: Code<F, N, K, R> = Code::new_reed_solomon(roots).unwrap();
+
+    // Compute distogram spectra
+    let mut spectra: HashMap<Vec<usize>, usize> = HashMap::new();
+    for word in HammingIter::<F, N>::new(N) {
+        let sizes = distogram(&code, word);
+        *spectra.entry(sizes).or_default() += 1;
+    }
+    let mut spectra: Vec<(Vec<usize>, usize)> = spectra.into_iter().collect();
+    spectra.sort_by(|a, b| b.0.cmp(&a.0));
+    for (spectrum, count) in spectra {
+        println!("  {spectrum:?}: {count}");
+    }
+}
+
+pub fn random_code<F: Field, const N: usize, const K: usize, const R: usize>() -> Code<F, N, K, R>
+where
+    StandardUniform: Distribution<F>,
+{
+    let mut rng = rand::rng();
+    loop {
+        // Random general code
+        // let generator = rng.random();
+        // if let Some(code) = Code::new(generator) {
+        //     println!("Random linear code.");
+        //     break code;
+        // }
+
+        // Random cyclic code
+        // let generator: [Fp; R + 1] = rng.random();
+        // if let Some(code) = Code::new_cyclic(generator) {
+        //     println!("Random cyclic code with generator: {:?}", generator);
+        //     break code;
+        // }
+
+        // Random Reed-Solomon code
+        // All: [1, 1, 3, 20, 91, 209, 343]
+        let eval_points = array::from_fn(|_| rng.random());
+        let mut sorted = eval_points.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        if sorted.len() < N {
+            continue;
+        }
+        println!("Eval points: {:?}", eval_points);
+        break Code::new_reed_solomon(eval_points).expect("Points are unique.");
+    }
+}
+
+fn main() {
+    const_for!(P in [3,5,7,13,17,19,23,29,31,37,41,43,47,53,59,61] {
+        type Fp = Fu8<{P as u8}>;
+        const_for!(K in  [1, 2,3,4,5,6,7,8,9,10,12,13] {
+            const_for!(R in [1,2,3,4,5,6,7,8,9,10,12,13] {
+                const N: usize = K + R;
+                if N <= P as usize {
+                    println!("Analyzing [{P}, {N}, {K}] code:");
+                    analyze::<Fp, N, K, R>();
+                }
+            });
+        });
+    });
 }

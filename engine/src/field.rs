@@ -7,7 +7,10 @@ use {
         fmt::{Debug, Display},
         ops,
     },
-    num_traits::{ConstOne, ConstZero, Inv, Num, NumAssign, One, Pow, PrimInt, Zero},
+    num_traits::{
+        ConstOne, ConstZero, FromPrimitive, Inv, Num, NumAssign, One, Pow, PrimInt, Zero,
+    },
+    std::ops::Neg,
 };
 
 pub trait Field:
@@ -16,8 +19,10 @@ pub trait Field:
     + Sync
     + Copy
     + Eq
+    + Ord
     + NumAssign
-    + Inv
+    + Neg<Output = Self>
+    + Inv<Output = Self> // 0.inv() == 0
     + Pow<usize>
     + From<Self::UInt>
     + Into<Self::UInt>
@@ -28,14 +33,14 @@ pub trait Field:
 where
     StandardUniform: Distribution<Self>,
 {
-    type UInt: 'static + Send + Sync + Copy + PrimInt + ConstZero + ConstOne + SampleUniform;
+    type UInt: 'static + Send + Sync + Copy + PrimInt + ConstZero + ConstOne + SampleUniform + FromPrimitive;
 
     const MODULUS: Self::UInt;
 }
 
 macro_rules! impl_field {
     ($name:ident, $uint:ty, $wide:ty) => {
-        #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name<const MODULUS: $uint>($uint);
 
         impl<const MODULUS: $uint> Field for $name<MODULUS> {

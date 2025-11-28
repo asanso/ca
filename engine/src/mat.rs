@@ -1,13 +1,20 @@
 use {
     crate::Field,
     core::ops,
-    num_traits::{ConstZero, Zero},
-    rand::distr::{Distribution, StandardUniform},
+    num_traits::{ConstZero, One, Zero},
+    rand::{
+        Rng,
+        distr::{Distribution, StandardUniform},
+    },
+    std::{array, fmt::Display, mem::swap},
 };
+
+pub type Col<F, const N: usize> = Mat<F, N, 1>;
+pub type Row<F, const M: usize> = Mat<F, 1, M>;
 
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct Mat<F: Field, const N: usize, const M: usize>([[F; M]; N])
+pub struct Mat<F: Field, const N: usize, const M: usize>(pub [[F; M]; N])
 where
     StandardUniform: Distribution<F>;
 
@@ -43,6 +50,85 @@ where
         }
         Mat(result)
     }
+
+    pub fn split_horizontal<const M1: usize, const M2: usize>(
+        &self,
+    ) -> (Mat<F, N, M1>, Mat<F, N, M2>) {
+        assert!(
+            M == M1 + M2,
+            "Expected M1 + M2 == M, got {M1} + {M2} != {M}"
+        );
+        let mut left = [[F::ZERO; M1]; N];
+        let mut right = [[F::ZERO; M2]; N];
+        for i in 0..N {
+            let (l, r) = self.0[i].split_at(M1);
+            left[i].copy_from_slice(l);
+            right[i].copy_from_slice(r);
+        }
+        (Mat(left), Mat(right))
+    }
+
+    pub fn join_horizontal<const M2: usize, const MR: usize>(
+        &self,
+        right: Mat<F, N, M2>,
+    ) -> Mat<F, N, MR> {
+        assert!(
+            M + M2 == MR,
+            "Expected M + M2 == MR, got {M} + {M2} != {MR}"
+        );
+        let mut result = [[F::ZERO; MR]; N];
+        for i in 0..N {
+            for j in 0..M {
+                result[i][j] = self.0[i][j];
+            }
+            for j in 0..M2 {
+                result[i][M + j] = right.0[i][j];
+            }
+        }
+        Mat(result)
+    }
+
+    /// Returns [None] if the matrix is not full rank.
+    pub fn normal_form(&self) -> Option<Mat<F, N, M>> {
+        let mut result = self.0;
+        let min_dim = if N < M { N } else { M };
+        for i in 0..min_dim {
+            // Find nonzero entry in this column
+            let pivot = (i..N).find(|&k| !result[k][i].is_zero())?;
+            // Swap rows if necessary
+            if pivot > i {
+                let (_, rows) = result.split_at_mut(i);
+                let (row, rows) = rows.split_first_mut().unwrap();
+                let (_, rows) = rows.split_at_mut(pivot - i - 1);
+                let (pivot_row, _) = rows.split_first_mut().unwrap();
+                swap(row, pivot_row);
+            }
+            // Make the diagonal contain all ones
+            let inv = result[i][i].inv();
+            for j in 0..M {
+                result[i][j] *= inv;
+            }
+            // Eliminate all other entries in this column
+            for k in 0..N {
+                if k != i {
+                    let factor = result[k][i];
+                    for j in 0..M {
+                        result[k][j] -= factor * result[i][j];
+                    }
+                }
+            }
+        }
+        Some(Mat(result))
+    }
+}
+
+impl<F: Field, const N: usize, const M: usize> Distribution<Mat<F, N, M>> for StandardUniform
+where
+    StandardUniform: Distribution<F>,
+{
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Mat<F, N, M> {
+        Mat(array::from_fn(|_| array::from_fn(|_| rng.random())))
+    }
 }
 
 impl<F: Field, const N: usize, const M: usize> Zero for Mat<F, N, M>
@@ -58,6 +144,19 @@ where
     }
 }
 
+impl<F: Field, const N: usize> One for Mat<F, N, N>
+where
+    StandardUniform: Distribution<F>,
+{
+    fn one() -> Self {
+        let mut result = [[F::ZERO; N]; N];
+        for i in 0..N {
+            result[i][i] = F::ONE;
+        }
+        Self(result)
+    }
+}
+
 impl<F: Field, const N: usize, const M: usize> ops::Add for Mat<F, N, M>
 where
     StandardUniform: Distribution<F>,
@@ -69,6 +168,23 @@ where
         for i in 0..N {
             for j in 0..M {
                 result[i][j] = self.0[i][j] + rhs.0[i][j];
+            }
+        }
+        Self(result)
+    }
+}
+
+impl<F: Field, const N: usize, const M: usize> ops::Neg for Mat<F, N, M>
+where
+    StandardUniform: Distribution<F>,
+{
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        let mut result = [[F::ZERO; M]; N];
+        for i in 0..N {
+            for j in 0..M {
+                result[i][j] = -self.0[i][j];
             }
         }
         Self(result)
@@ -126,5 +242,21 @@ where
             }
         }
         result
+    }
+}
+
+impl<F: Field, const N: usize, const M: usize> Display for Mat<F, N, M>
+where
+    StandardUniform: Distribution<F>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for i in 0..N {
+            write!(f, "[ ")?;
+            for j in 0..M {
+                write!(f, "{:2} ", self.0[i][j])?;
+            }
+            writeln!(f, "]")?;
+        }
+        Ok(())
     }
 }
