@@ -70,6 +70,15 @@ where
         self.cols
     }
 
+    pub fn row(&self, i: usize) -> &[F] {
+        assert!(
+            i < self.rows,
+            "Row index out of bounds: {i} >= {}",
+            self.rows
+        );
+        &self.values[i * self.cols..(i + 1) * self.cols]
+    }
+
     pub fn transpose(&self) -> Self {
         let mut result = Self::zero(self.cols, self.rows);
         for i in 0..self.rows {
@@ -162,6 +171,26 @@ where
             }
         }
         Some(result)
+    }
+
+    pub fn is_normal_form(&self) -> bool {
+        let min_dim = if self.rows < self.cols {
+            self.rows
+        } else {
+            self.cols
+        };
+        for i in 0..min_dim {
+            for j in 0..i {
+                if i == j {
+                    if !self[(i, j)].is_one() {
+                        return false;
+                    }
+                } else if !self[(i, j)].is_zero() {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 

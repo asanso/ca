@@ -113,6 +113,75 @@ where
     distogram
 }
 
+pub fn normalize_offset<F: Field>(offset: &mut [F], space: &Mat<F>)
+where
+    StandardUniform: Distribution<F>,
+{
+    let k = space.rows();
+    let n = space.cols();
+    assert!(k <= n);
+    assert!(offset.len() == n);
+    assert!(space.is_normal_form());
+
+    for i in 0..k {
+        if !offset[i].is_zero() {
+            let coeff = offset[i];
+            for j in 0..n {
+                offset[j] -= coeff * space.row(i)[j];
+            }
+        }
+    }
+    assert!(offset[..k].iter().all(|x| x.is_zero()));
+}
+
+/// Weight distribution of an affine subspace.
+pub fn weight_distribution<F: Field>(offset: &[F], space: &Mat<F>) -> Vec<usize>
+where
+    StandardUniform: Distribution<F>,
+{
+    let n = space.cols();
+    let k = space.rows();
+    assert!(k <= n);
+    assert!(offset.len() == n);
+    assert!(space.is_normal_form());
+    assert!(offset[..k].iter().all(|x| x.is_zero()));
+
+    let mut histogram = vec![0_usize; n + 1];
+    let mut counter = vec![F::ZERO; k];
+    let mut counter_weight = 0;
+    let mut active = offset[k..].to_vec();
+    'outer: loop {
+        // Count weight
+        let w = counter_weight + weight(&active);
+        histogram[w] += 1;
+
+        // Increment
+        let mut index = k - 1;
+        loop {
+            active
+                .iter_mut()
+                .zip(space.row(index)[k..].iter())
+                .for_each(|(c, s)| {
+                    *c += *s;
+                });
+            if counter[index] == F::ZERO {
+                counter_weight += 1;
+            }
+            counter[index] += F::ONE;
+            if counter[index] == F::ZERO {
+                counter_weight -= 1;
+                if index == 0 {
+                    break 'outer;
+                }
+                index -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+    histogram
+}
+
 pub fn max_distances<F: Field>(code: &Code<F>) -> Vec<usize>
 where
     StandardUniform: Distribution<F>,
@@ -227,6 +296,7 @@ pub fn analyze<F: Field>(k: usize, r: usize)
 where
     StandardUniform: Distribution<F>,
 {
+    let q = F::MODULUS.to_usize().unwrap();
     let n = k + r;
     let roots: Vec<F> = (0..n)
         .map(|i| F::from(F::UInt::from_usize(i).unwrap()))
@@ -234,10 +304,20 @@ where
     let code: Code<F> = Code::new_reed_solomon(k, &roots).unwrap();
 
     // Compute distogram spectra
+    let block_size = q.pow(k as u32);
     let mut spectra: HashMap<Vec<usize>, usize> = HashMap::new();
-    for word in HammingIter::<F>::new(n, n) {
-        let sizes = distogram(&code, &word);
-        *spectra.entry(sizes).or_default() += 1;
+    let mut offset = vec![F::ZERO; n];
+    if r == 0 {
+        // Special case: no parity.
+        let sizes = weight_distribution(&offset, code.generator());
+        *spectra.entry(sizes).or_default() += block_size;
+    } else {
+        // General case: iterate over all syndromes
+        for word in HammingIter::<F>::new(r, r) {
+            offset[k..].copy_from_slice(&word);
+            let sizes = weight_distribution(&offset, code.generator());
+            *spectra.entry(sizes).or_default() += block_size;
+        }
     }
     let mut spectra: Vec<(Vec<usize>, usize)> = spectra.into_iter().collect();
     spectra.sort_by(|a, b| b.0.cmp(&a.0));

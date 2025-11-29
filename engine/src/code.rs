@@ -61,12 +61,12 @@ where
         }
     }
 
-    pub fn generator(&self) -> Mat<F> {
-        self.generator.clone()
+    pub fn generator(&self) -> &Mat<F> {
+        &self.generator
     }
 
-    pub fn parity(&self) -> Mat<F> {
-        self.parity.clone()
+    pub fn parity(&self) -> &Mat<F> {
+        &self.parity
     }
 
     /// The alphabet size.
