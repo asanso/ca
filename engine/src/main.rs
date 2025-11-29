@@ -64,7 +64,7 @@ where
             // List decode (all codewords within distance 3)
             count.fill(0);
             for candidate in codewords {
-                let d = dist(*candidate, received);
+                let d = dist(candidate, &received);
                 count[d] += 1;
             }
 
@@ -101,32 +101,27 @@ where
 }
 
 /// Distrogram: number of codewords at distance d for d=0..=N
-pub fn distogram<F: Field, const N: usize, const K: usize, const R: usize>(
-    code: &Code<F, N, K, R>,
-    word: [F; N],
-) -> Vec<usize>
+pub fn distogram<F: Field>(code: &Code<F>, word: &[F]) -> Vec<usize>
 where
     StandardUniform: Distribution<F>,
 {
-    let mut distogram = vec![0usize; N + 1];
+    let mut distogram = vec![0_usize; code.n() + 1];
     for codeword in code.codewords() {
-        let d = dist(codeword, word);
+        let d = dist(&codeword, word);
         distogram[d] += 1;
     }
     distogram
 }
 
-pub fn max_distances<F: Field, const N: usize, const K: usize, const R: usize>(
-    code: &Code<F, N, K, R>,
-) -> Vec<usize>
+pub fn max_distances<F: Field>(code: &Code<F>) -> Vec<usize>
 where
     StandardUniform: Distribution<F>,
 {
-    let mut max_count = vec![0usize; N + 1];
-    for word in HammingIter::<F, N>::new(N) {
-        let mut count = vec![0usize; N + 1];
+    let mut max_count = vec![0usize; code.n() + 1];
+    for word in HammingIter::<F>::new(code.n(), code.n()) {
+        let mut count = vec![0usize; code.n() + 1];
         for codeword in code.codewords() {
-            let d = dist(codeword, word);
+            let d = dist(&codeword, &word);
             count[d] += 1;
         }
         // Cumulative sum to get all codewords within distance <= d
@@ -170,32 +165,30 @@ pub fn mds_weights_fomula(q: usize, n: usize, k: usize) -> Vec<usize> {
         .collect()
 }
 
-pub fn print_code<F: Field, const N: usize, const K: usize, const R: usize>(code: &Code<F, N, K, R>)
+pub fn print_code<F: Field>(code: &Code<F>)
 where
     StandardUniform: Distribution<F>,
 {
     let weights = code.weights();
 
-    let weights_formula = mds_weights_fomula(F::MODULUS.to_usize().unwrap(), N, K);
-    let weights_formula2 = mds_weights_fomula(F::MODULUS.to_usize().unwrap(), N - 1, K - 1);
-    let weights_formula3 = mds_weights_fomula(F::MODULUS.to_usize().unwrap(), N - 1, K);
-    println!("Weights formula:    {weights_formula:?} {weights_formula2:?} {weights_formula3:?}");
+    let weights_formula = mds_weights_fomula(code.q(), code.n(), code.k());
+    println!("Weights formula:    {weights_formula:?}");
 
     for codeword in code.codewords() {
-        let sizes = distogram(&code, codeword);
+        let sizes = distogram(&code, &codeword);
         assert_eq!(weights, sizes);
     }
     println!("Weights count:     {weights:?}");
 
     let mut spectra: HashMap<Vec<usize>, usize> = HashMap::new();
-    for word in HammingIter::<F, N>::new(N) {
-        let sizes = distogram(&code, word);
+    for word in HammingIter::<F>::new(code.n(), code.n()) {
+        let sizes = distogram(&code, &word);
         *spectra.entry(sizes).or_default() += 1;
     }
     println!("Spectra count");
 
     // Sort spectra
-    let mut spectra_list_max = vec![0usize; N + 1];
+    let mut spectra_list_max = vec![0usize; code.n() + 1];
     let mut spectra: Vec<(Vec<usize>, usize)> = spectra.into_iter().collect();
     spectra.sort_by(|a, b| b.0.cmp(&a.0));
     for (spectrum, count) in spectra {
@@ -230,17 +223,20 @@ pub fn binomial_coeff(n: usize, k: usize) -> usize {
     result
 }
 
-pub fn analyze<F: Field, const N: usize, const K: usize, const R: usize>()
+pub fn analyze<F: Field>(k: usize, r: usize)
 where
     StandardUniform: Distribution<F>,
 {
-    let roots = array::from_fn(|i| F::from(F::UInt::from_usize(i).unwrap()));
-    let code: Code<F, N, K, R> = Code::new_reed_solomon(roots).unwrap();
+    let n = k + r;
+    let roots: Vec<F> = (0..n)
+        .map(|i| F::from(F::UInt::from_usize(i).unwrap()))
+        .collect();
+    let code: Code<F> = Code::new_reed_solomon(k, &roots).unwrap();
 
     // Compute distogram spectra
     let mut spectra: HashMap<Vec<usize>, usize> = HashMap::new();
-    for word in HammingIter::<F, N>::new(N) {
-        let sizes = distogram(&code, word);
+    for word in HammingIter::<F>::new(n, n) {
+        let sizes = distogram(&code, &word);
         *spectra.entry(sizes).or_default() += 1;
     }
     let mut spectra: Vec<(Vec<usize>, usize)> = spectra.into_iter().collect();
@@ -250,10 +246,11 @@ where
     }
 }
 
-pub fn random_code<F: Field, const N: usize, const K: usize, const R: usize>() -> Code<F, N, K, R>
+pub fn random_code<F: Field>(k: usize, r: usize) -> Code<F>
 where
     StandardUniform: Distribution<F>,
 {
+    let n = k + r;
     let mut rng = rand::rng();
     loop {
         // Random general code
@@ -272,29 +269,31 @@ where
 
         // Random Reed-Solomon code
         // All: [1, 1, 3, 20, 91, 209, 343]
-        let eval_points = array::from_fn(|_| rng.random());
+        let eval_points = (0..n).map(|_| rng.random()).collect::<Vec<F>>();
         let mut sorted = eval_points.to_vec();
         sorted.sort();
         sorted.dedup();
-        if sorted.len() < N {
+        if sorted.len() < n {
             continue;
         }
         println!("Eval points: {:?}", eval_points);
-        break Code::new_reed_solomon(eval_points).expect("Points are unique.");
+        break Code::new_reed_solomon(k, &eval_points).expect("Points are unique.");
     }
 }
 
 fn main() {
     const_for!(P in [3,5,7,13,17,19,23,29,31,37,41,43,47,53,59,61] {
         type Fp = Fu8<{P as u8}>;
-        const_for!(K in  [1, 2,3,4,5,6,7,8,9,10,12,13] {
-            const_for!(R in [1,2,3,4,5,6,7,8,9,10,12,13] {
-                const N: usize = K + R;
-                if N <= P as usize {
-                    println!("Analyzing [{P}, {N}, {K}] code:");
-                    analyze::<Fp, N, K, R>();
-                }
-            });
-        });
+        for n in 1..P {
+            for k in 1..=n {
+                let r = n - k;
+                println!("Spectrum of [{P}, {n}, {k}] RS code:");
+                analyze::<Fp>(k, r);
+            }
+        }
     });
 }
+
+// [q, i, i] =>  https://oeis.org/search?q=1%2C+24%2C+216%2C+864%2C+1296&go=Search
+//               T(n,k) = A007318(n,k)*A000400(k), 0 <= k <= n. - Reinhard
+// Zumkeller, Nov 21 2013

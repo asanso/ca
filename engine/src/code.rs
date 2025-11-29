@@ -5,16 +5,16 @@ use {
     std::fmt::{Debug, Display},
 };
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub struct Code<F: Field, const N: usize, const K: usize, const R: usize>
+#[derive(Clone, PartialEq, Eq)]
+pub struct Code<F: Field>
 where
     StandardUniform: Distribution<F>,
 {
-    generator: Mat<F, K, N>,
-    parity:    Mat<F, R, N>,
+    generator: Mat<F>,
+    parity:    Mat<F>,
 }
 
-impl<F: Field, const N: usize, const K: usize, const R: usize> Code<F, N, K, R>
+impl<F: Field> Code<F>
 where
     StandardUniform: Distribution<F>,
 {
@@ -23,10 +23,13 @@ where
     /// The generator and parity matrices are put into standard form.
     ///
     /// Returns [None] if the generator matrix is not full rank.
-    pub fn new(generator: Mat<F, K, N>) -> Option<Self> {
+    pub fn new(generator: Mat<F>) -> Option<Self> {
+        let n = generator.cols();
+        let k = generator.rows();
+        let r = n - k;
         let generator = generator.normal_form()?;
-        let (_, p) = generator.split_horizontal::<K, R>();
-        let parity = (-p).transpose().join_horizontal::<R, N>(Mat::one());
+        let (_, p) = generator.split_horizontal(k);
+        let parity = (-p).transpose().join_horizontal(Mat::one(r));
         let parity = parity.normal_form()?;
         Some(Self { generator, parity })
     }
@@ -34,73 +37,97 @@ where
     /// Creates a new Reed-Solomon code with the given evaluation points.
     ///
     /// Returns [None] if the `evaluation_points` are not distinct.
-    pub fn new_reed_solomon(eval_points: [F; N]) -> Option<Self> {
-        Self::new(Mat::vandermonde(eval_points).transpose())
+    pub fn new_reed_solomon(k: usize, eval_points: &[F]) -> Option<Self> {
+        Self::new(Mat::vandermonde(eval_points, k).transpose())
     }
 
     /// Creates a new cyclic code with the given generator polynomial.
-    pub fn new_cyclic<const R1: usize>(generator: [F; R1]) -> Option<Self> {
-        assert_eq!(R1, R + 1, "generator must have length R + 1");
-        let mut gen_matrix = [[F::ZERO; N]; K];
-        for i in 0..K {
-            gen_matrix[i][i..(i + R1)].copy_from_slice(&generator);
+    pub fn new_cyclic(k: usize, generator: &[F]) -> Option<Self> {
+        let r = generator.len() - 1;
+        let n = k + r;
+        let mut gen_matrix = Mat::zero(k, n);
+        for i in 0..k {
+            for j in 0..=r {
+                gen_matrix[(i, i + j)] = generator[j];
+            }
         }
-        Self::new(Mat(gen_matrix))
+        Self::new(gen_matrix)
     }
 
-    pub fn dual(&self) -> Code<F, N, R, K> {
+    pub fn dual(&self) -> Code<F> {
         Code {
-            generator: self.parity,
-            parity:    self.generator,
+            generator: self.parity.clone(),
+            parity:    self.generator.clone(),
         }
     }
 
-    pub fn generator(&self) -> Mat<F, K, N> {
-        self.generator
+    pub fn generator(&self) -> Mat<F> {
+        self.generator.clone()
     }
 
-    pub fn parity(&self) -> Mat<F, R, N> {
-        self.parity
+    pub fn parity(&self) -> Mat<F> {
+        self.parity.clone()
     }
 
-    pub fn size(&self) -> usize {
-        F::MODULUS.to_usize().unwrap().pow(K as u32)
+    /// The alphabet size.
+    pub fn q(&self) -> usize {
+        F::MODULUS.to_usize().unwrap()
     }
 
-    pub fn codewords(&self) -> impl Iterator<Item = [F; N]> + '_ {
-        HammingIter::new(K).map(move |message| self.encode(message))
+    /// The number of codeword symbols.
+    pub fn n(&self) -> usize {
+        self.generator.cols()
+    }
+
+    /// The number of message symbols.
+    pub fn k(&self) -> usize {
+        self.generator.rows()
+    }
+
+    /// The number of parity symbols.
+    pub fn redundancy(&self) -> usize {
+        self.parity.rows()
     }
 
     pub fn rate(&self) -> f64 {
-        K as f64 / N as f64
+        self.k() as f64 / self.n() as f64
+    }
+
+    /// The number of codewords.
+    pub fn size(&self) -> usize {
+        F::MODULUS.to_usize().unwrap().pow(self.k() as u32)
+    }
+
+    pub fn codewords(&self) -> impl Iterator<Item = Vec<F>> + '_ {
+        HammingIter::new(self.k(), self.k()).map(move |message| self.encode(&message))
     }
 
     /// Count of codewords of each weight.
     pub fn weights(&self) -> Vec<usize> {
-        let mut weights = vec![0usize; N + 1];
+        let mut weights = vec![0_usize; self.n() + 1];
         for codeword in self.codewords() {
-            let w = weight(codeword);
+            let w = weight(&codeword);
             weights[w] += 1;
         }
         weights
     }
 
-    pub fn encode(&self, message: [F; K]) -> [F; N] {
-        message * self.generator
+    pub fn encode(&self, message: &[F]) -> Vec<F> {
+        message * &self.generator
     }
 
-    pub fn syndrome(&self, word: [F; N]) -> [F; R] {
-        self.parity * word
+    pub fn syndrome(&self, word: &[F]) -> Vec<F> {
+        &self.parity * word
     }
 
-    pub fn decode(&self, word: [F; N], max_dist: usize) -> impl Iterator<Item = [F; K]> {
+    pub fn decode(&self, word: &[F], max_dist: usize) -> impl Iterator<Item = Vec<F>> {
         let syndrome = self.syndrome(word);
-        HammingIter::new(max_dist).filter_map(move |error| {
-            let test_syndrome = self.syndrome(error);
+        HammingIter::new(self.n(), max_dist).filter_map(move |error| {
+            let test_syndrome = self.syndrome(&error);
             if test_syndrome == syndrome {
                 // Extract message (using the fact that generator is in standard form)
-                let mut message = [F::ZERO; K];
-                for i in 0..K {
+                let mut message = vec![F::ZERO; self.k()];
+                for i in 0..self.k() {
                     message[i] = word[i] - error[i];
                 }
                 Some(message)
@@ -111,11 +138,11 @@ where
     }
 }
 
-impl<F: Field, const N: usize, const K: usize, const R: usize> Display for Code<F, N, K, R>
+impl<F: Field> Display for Code<F>
 where
     StandardUniform: Distribution<F>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({N}, {K}) Linear Code")
+        write!(f, "({}, {}) Linear Code", self.n(), self.k())
     }
 }

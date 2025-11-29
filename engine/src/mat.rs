@@ -1,243 +1,273 @@
 use {
     crate::Field,
     core::ops,
-    num_traits::{ConstZero, One, Zero},
     rand::{
         Rng,
         distr::{Distribution, StandardUniform},
     },
-    std::{array, fmt::Display, mem::swap},
+    std::{
+        fmt::Display,
+        ops::{Index, IndexMut},
+    },
 };
 
-pub type Col<F, const N: usize> = Mat<F, N, 1>;
-pub type Row<F, const M: usize> = Mat<F, 1, M>;
-
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct Mat<F: Field, const N: usize, const M: usize>(pub [[F; M]; N])
-where
-    StandardUniform: Distribution<F>;
-
-impl<F: Field, const N: usize, const M: usize> ConstZero for Mat<F, N, M>
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Mat<F: Field>
 where
     StandardUniform: Distribution<F>,
 {
-    const ZERO: Self = Self([[F::ZERO; M]; N]);
+    rows:   usize,
+    cols:   usize,
+    values: Vec<F>,
 }
 
-impl<F: Field, const N: usize, const M: usize> Mat<F, N, M>
+impl<F: Field> Mat<F>
 where
     StandardUniform: Distribution<F>,
 {
-    pub fn vandermonde(eval_points: [F; N]) -> Self {
-        let mut result = [[F::ZERO; M]; N];
-        for i in 0..N {
+    pub fn zero(rows: usize, cols: usize) -> Self {
+        Self {
+            rows,
+            cols,
+            values: vec![F::ZERO; rows * cols],
+        }
+    }
+
+    pub fn one(size: usize) -> Self {
+        let mut result = Self::zero(size, size);
+        for i in 0..size {
+            result[(i, i)] = F::ONE;
+        }
+        result
+    }
+
+    pub fn random(rows: usize, cols: usize) -> Self {
+        let mut rng = rand::rng();
+        let mut values = Vec::with_capacity(rows * cols);
+        for _ in 0..(rows * cols) {
+            values.push(rng.random());
+        }
+        Self { rows, cols, values }
+    }
+
+    pub fn vandermonde(eval_points: &[F], cols: usize) -> Self {
+        let mut result = Self::zero(eval_points.len(), cols);
+        for i in 0..result.rows {
             let mut v = F::ONE;
-            for j in 0..M {
-                result[i][j] = v;
+            for j in 0..result.cols {
+                result[(i, j)] = v;
                 v *= eval_points[i];
             }
         }
-        Self(result)
+        result
     }
 
-    pub fn transpose(&self) -> Mat<F, M, N> {
-        let mut result = [[F::ZERO; N]; M];
-        for i in 0..N {
-            for j in 0..M {
-                result[j][i] = self.0[i][j];
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    pub fn transpose(&self) -> Self {
+        let mut result = Self::zero(self.cols, self.rows);
+        for i in 0..self.rows {
+            for j in 0..self.cols {
+                result[(j, i)] = self[(i, j)];
             }
         }
-        Mat(result)
+        result
     }
 
-    pub fn split_horizontal<const M1: usize, const M2: usize>(
-        &self,
-    ) -> (Mat<F, N, M1>, Mat<F, N, M2>) {
+    pub fn split_horizontal(&self, col: usize) -> (Self, Self) {
+        assert!(col <= self.cols, "Column index out of bounds");
+        let mut left = Self::zero(self.rows, col);
+        let mut right = Self::zero(self.rows, self.cols - col);
+        for i in 0..self.rows {
+            for j in 0..col {
+                left[(i, j)] = self[(i, j)];
+            }
+            for j in col..self.cols {
+                right[(i, j - col)] = self[(i, j)];
+            }
+        }
+        (left, right)
+    }
+
+    pub fn join_horizontal(&self, right: Self) -> Self {
         assert!(
-            M == M1 + M2,
-            "Expected M1 + M2 == M, got {M1} + {M2} != {M}"
+            self.rows == right.rows,
+            "Row count mismatch: {} != {}",
+            self.rows,
+            right.rows
         );
-        let mut left = [[F::ZERO; M1]; N];
-        let mut right = [[F::ZERO; M2]; N];
-        for i in 0..N {
-            let (l, r) = self.0[i].split_at(M1);
-            left[i].copy_from_slice(l);
-            right[i].copy_from_slice(r);
+        let mut result = Self::zero(self.rows, self.cols + right.cols);
+        for i in 0..self.rows {
+            for j in 0..self.cols {
+                result[(i, j)] = self[(i, j)];
+            }
+            for j in 0..right.cols {
+                result[(i, j + self.cols)] = right[(i, j)];
+            }
         }
-        (Mat(left), Mat(right))
+        result
     }
 
-    pub fn join_horizontal<const M2: usize, const MR: usize>(
-        &self,
-        right: Mat<F, N, M2>,
-    ) -> Mat<F, N, MR> {
+    pub fn swap_rows(&mut self, i: usize, j: usize) {
         assert!(
-            M + M2 == MR,
-            "Expected M + M2 == MR, got {M} + {M2} != {MR}"
+            i < self.rows,
+            "Row index out of bounds: {i} >= {}",
+            self.rows
         );
-        let mut result = [[F::ZERO; MR]; N];
-        for i in 0..N {
-            for j in 0..M {
-                result[i][j] = self.0[i][j];
-            }
-            for j in 0..M2 {
-                result[i][M + j] = right.0[i][j];
-            }
+        assert!(
+            j < self.rows,
+            "Row index out of bounds: {j} >= {}",
+            self.rows
+        );
+        for k in 0..self.cols {
+            self.values.swap(i * self.cols + k, j * self.cols + k);
         }
-        Mat(result)
     }
 
     /// Returns [None] if the matrix is not full rank.
-    pub fn normal_form(&self) -> Option<Mat<F, N, M>> {
-        let mut result = self.0;
-        let min_dim = if N < M { N } else { M };
+    pub fn normal_form(&self) -> Option<Self> {
+        let mut result = self.clone();
+        let min_dim = if self.rows < self.cols {
+            self.rows
+        } else {
+            self.cols
+        };
         for i in 0..min_dim {
             // Find nonzero entry in this column
-            let pivot = (i..N).find(|&k| !result[k][i].is_zero())?;
+            let pivot = (i..self.rows).find(|&k| !result[(k, i)].is_zero())?;
             // Swap rows if necessary
             if pivot > i {
-                let (_, rows) = result.split_at_mut(i);
-                let (row, rows) = rows.split_first_mut().unwrap();
-                let (_, rows) = rows.split_at_mut(pivot - i - 1);
-                let (pivot_row, _) = rows.split_first_mut().unwrap();
-                swap(row, pivot_row);
+                result.swap_rows(i, pivot);
             }
             // Make the diagonal contain all ones
-            let inv = result[i][i].inv();
-            for j in 0..M {
-                result[i][j] *= inv;
+            let inv = result[(i, i)].inv();
+            for j in 0..self.cols {
+                result[(i, j)] *= inv;
             }
             // Eliminate all other entries in this column
-            for k in 0..N {
+            for k in 0..self.rows {
                 if k != i {
-                    let factor = result[k][i];
-                    for j in 0..M {
-                        result[k][j] -= factor * result[i][j];
+                    let factor = result[(k, i)];
+                    for j in 0..self.cols {
+                        let scaled = factor * result[(i, j)];
+                        result[(k, j)] -= scaled;
                     }
                 }
             }
         }
-        Some(Mat(result))
+        Some(result)
     }
 }
 
-impl<F: Field, const N: usize, const M: usize> Distribution<Mat<F, N, M>> for StandardUniform
+impl<F: Field> Index<(usize, usize)> for Mat<F>
 where
     StandardUniform: Distribution<F>,
 {
-    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Mat<F, N, M> {
-        Mat(array::from_fn(|_| array::from_fn(|_| rng.random())))
+    type Output = F;
+
+    fn index(&self, (i, j): (usize, usize)) -> &Self::Output {
+        assert!(
+            i < self.rows,
+            "Row index out of bounds: {i} >= {}",
+            self.rows
+        );
+        assert!(
+            j < self.cols,
+            "Column index out of bounds: {j} >= {}",
+            self.cols
+        );
+        &self.values[i * self.cols + j]
     }
 }
 
-impl<F: Field, const N: usize, const M: usize> Zero for Mat<F, N, M>
+impl<F: Field> IndexMut<(usize, usize)> for Mat<F>
 where
     StandardUniform: Distribution<F>,
 {
-    fn zero() -> Self {
-        Self([[F::ZERO; M]; N])
-    }
-
-    fn is_zero(&self) -> bool {
-        self == &Self::zero()
-    }
-}
-
-impl<F: Field, const N: usize> One for Mat<F, N, N>
-where
-    StandardUniform: Distribution<F>,
-{
-    fn one() -> Self {
-        let mut result = [[F::ZERO; N]; N];
-        for i in 0..N {
-            result[i][i] = F::ONE;
-        }
-        Self(result)
+    fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut Self::Output {
+        assert!(
+            i < self.rows,
+            "Row index out of bounds: {i} >= {}",
+            self.rows
+        );
+        assert!(
+            j < self.cols,
+            "Column index out of bounds: {j} >= {}",
+            self.cols
+        );
+        &mut self.values[i * self.cols + j]
     }
 }
 
-impl<F: Field, const N: usize, const M: usize> ops::Add for Mat<F, N, M>
+impl<F: Field> ops::Add for Mat<F>
 where
     StandardUniform: Distribution<F>,
 {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        let mut result = [[F::ZERO; M]; N];
-        for i in 0..N {
-            for j in 0..M {
-                result[i][j] = self.0[i][j] + rhs.0[i][j];
-            }
+        assert!(
+            self.rows == rhs.rows && self.cols == rhs.cols,
+            "Matrix size mismatch: {}x{} != {}x{}",
+            self.rows,
+            self.cols,
+            rhs.rows,
+            rhs.cols
+        );
+        Self {
+            rows:   self.rows,
+            cols:   self.cols,
+            values: self
+                .values
+                .iter()
+                .zip(rhs.values.iter())
+                .map(|(a, b)| *a + *b)
+                .collect(),
         }
-        Self(result)
     }
 }
 
-impl<F: Field, const N: usize, const M: usize> ops::Neg for Mat<F, N, M>
+impl<F: Field> ops::Neg for Mat<F>
 where
     StandardUniform: Distribution<F>,
 {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
-        let mut result = [[F::ZERO; M]; N];
-        for i in 0..N {
-            for j in 0..M {
-                result[i][j] = -self.0[i][j];
-            }
+        Self {
+            rows:   self.rows,
+            cols:   self.cols,
+            values: self.values.iter().map(|a| -*a).collect(),
         }
-        Self(result)
     }
 }
 
-impl<F: Field, const N: usize, const M: usize> ops::Mul<[F; M]> for Mat<F, N, M>
+impl<F: Field> ops::Mul<&Mat<F>> for &Mat<F>
 where
     StandardUniform: Distribution<F>,
 {
-    type Output = [F; N];
+    type Output = Mat<F>;
 
-    fn mul(self, rhs: [F; M]) -> Self::Output {
-        let mut result = [F::ZERO; N];
-        for i in 0..N {
-            for j in 0..M {
-                result[i] += self.0[i][j] * rhs[j];
-            }
-        }
-        result
-    }
-}
-
-impl<F: Field, const N: usize, const M: usize> ops::Mul<Mat<F, N, M>> for [F; N]
-where
-    StandardUniform: Distribution<F>,
-{
-    type Output = [F; M];
-
-    fn mul(self, rhs: Mat<F, N, M>) -> Self::Output {
-        let mut result = [F::ZERO; M];
-        for j in 0..M {
-            for i in 0..N {
-                result[j] += self[i] * rhs.0[i][j];
-            }
-        }
-        result
-    }
-}
-
-impl<F: Field, const N: usize, const K: usize, const M: usize> ops::Mul<Mat<F, K, M>>
-    for Mat<F, N, K>
-where
-    StandardUniform: Distribution<F>,
-{
-    type Output = Mat<F, N, M>;
-
-    fn mul(self, rhs: Mat<F, K, M>) -> Self::Output {
-        let mut result = Mat::zero();
-        for i in 0..N {
-            for j in 0..M {
-                for k in 0..K {
-                    result.0[i][j] += self.0[i][k] * rhs.0[k][j];
+    fn mul(self, rhs: &Mat<F>) -> Self::Output {
+        assert!(
+            self.cols == rhs.rows,
+            "Matrix size mismatch: {}x{} * {}x{}",
+            self.rows,
+            self.cols,
+            rhs.rows,
+            rhs.cols
+        );
+        let mut result = Mat::zero(self.rows, rhs.cols);
+        for i in 0..self.rows {
+            for j in 0..rhs.cols {
+                for k in 0..self.cols {
+                    result[(i, j)] += self[(i, k)] * rhs[(k, j)];
                 }
             }
         }
@@ -245,15 +275,63 @@ where
     }
 }
 
-impl<F: Field, const N: usize, const M: usize> Display for Mat<F, N, M>
+impl<F: Field> ops::Mul<&Mat<F>> for &[F]
+where
+    StandardUniform: Distribution<F>,
+{
+    type Output = Vec<F>;
+
+    fn mul(self, rhs: &Mat<F>) -> Self::Output {
+        assert!(
+            self.len() == rhs.rows,
+            "Vector and matrix size mismatch: {} * {}x{}",
+            self.len(),
+            rhs.rows,
+            rhs.cols
+        );
+        let mut result = vec![F::ZERO; rhs.cols];
+        for j in 0..rhs.cols {
+            for i in 0..rhs.rows {
+                result[j] += self[i] * rhs[(i, j)];
+            }
+        }
+        result
+    }
+}
+
+impl<F: Field> ops::Mul<&[F]> for &Mat<F>
+where
+    StandardUniform: Distribution<F>,
+{
+    type Output = Vec<F>;
+
+    fn mul(self, rhs: &[F]) -> Self::Output {
+        assert!(
+            self.cols == rhs.len(),
+            "Matrix and vector size mismatch: {}x{} * {}",
+            self.rows,
+            self.cols,
+            rhs.len()
+        );
+        let mut result = vec![F::ZERO; self.rows];
+        for i in 0..self.rows {
+            for j in 0..self.cols {
+                result[i] += self[(i, j)] * rhs[j];
+            }
+        }
+        result
+    }
+}
+
+impl<F: Field> Display for Mat<F>
 where
     StandardUniform: Distribution<F>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for i in 0..N {
+        for i in 0..self.rows {
             write!(f, "[ ")?;
-            for j in 0..M {
-                write!(f, "{:2} ", self.0[i][j])?;
+            for j in 0..self.cols {
+                write!(f, "{:2} ", self[(i, j)])?;
             }
             writeln!(f, "]")?;
         }

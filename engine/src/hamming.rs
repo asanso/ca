@@ -4,68 +4,57 @@ use {
     rand::distr::{Distribution, StandardUniform},
 };
 
-pub fn weight<T: Zero, const N: usize>(a: [T; N]) -> usize {
-    let mut w = 0;
-    for i in 0..N {
-        if !a[i].is_zero() {
-            w += 1;
-        }
-    }
-    w
+pub fn weight<T: Zero>(a: &[T]) -> usize {
+    a.iter().filter(|x| !x.is_zero()).count()
 }
 
-pub fn dist<T: Eq, const N: usize>(a: [T; N], b: [T; N]) -> usize {
-    let mut d = 0;
-    for i in 0..N {
-        if a[i] != b[i] {
-            d += 1;
-        }
-    }
-    d
+pub fn dist<T: Eq>(a: &[T], b: &[T]) -> usize {
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b.iter()).filter(|(x, y)| x != y).count()
 }
 
 /// Iterator over all vectors of length N and Hamming weight at most
 /// `max_weight`.
-pub struct HammingIter<F: Field, const N: usize>
+pub struct HammingIter<F: Field>
 where
     StandardUniform: Distribution<F>,
 {
     pub max_weight: usize,
     pub index:      usize,
     pub weight:     usize,
-    pub current:    [F; N],
+    pub current:    Vec<F>,
 }
 
-impl<F: Field, const N: usize> HammingIter<F, N>
+impl<F: Field> HammingIter<F>
 where
     StandardUniform: Distribution<F>,
 {
-    pub fn new(max_weight: usize) -> Self {
+    pub fn new(size: usize, max_weight: usize) -> Self {
         Self {
             max_weight,
             index: 0,
             weight: 0,
-            current: [F::ZERO; N],
+            current: vec![F::ZERO; size],
         }
     }
 }
 
-impl<F: Field, const N: usize> Iterator for HammingIter<F, N>
+impl<F: Field> Iterator for HammingIter<F>
 where
     StandardUniform: Distribution<F>,
 {
-    type Item = [F; N];
+    type Item = Vec<F>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index == N {
+        if self.index == self.current.len() {
             return None;
         }
-        let val = self.current;
+        let value = self.current.clone();
         loop {
             if self.weight == self.max_weight && self.current[self.index] == F::ZERO {
                 // Skip to next index
                 self.index += 1;
-                if self.index == N {
+                if self.index == self.current.len() {
                     break;
                 }
                 continue;
@@ -79,7 +68,7 @@ where
                 // Wrapped around
                 self.weight -= 1;
                 self.index += 1;
-                if self.index == N {
+                if self.index == self.current.len() {
                     break;
                 }
                 continue;
@@ -88,6 +77,6 @@ where
                 break;
             }
         }
-        Some(val)
+        Some(value)
     }
 }
