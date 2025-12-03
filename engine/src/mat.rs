@@ -50,14 +50,22 @@ where
         Self { rows, cols, values }
     }
 
-    pub fn vandermonde(eval_points: &[F], cols: usize) -> Self {
-        let mut result = Self::zero(eval_points.len(), cols);
-        for i in 0..result.rows {
+    pub fn vandermonde(eval_points: &[F], cols: usize, extended: bool) -> Self {
+        let rows = if extended {
+            eval_points.len() + 1
+        } else {
+            eval_points.len()
+        };
+        let mut result = Self::zero(rows, cols);
+        for i in 0..eval_points.len() {
             let mut v = F::ONE;
             for j in 0..result.cols {
                 result[(i, j)] = v;
                 v *= eval_points[i];
             }
+        }
+        if extended && cols > 0 {
+            result[(rows - 1, cols - 1)] = F::ONE;
         }
         result
     }

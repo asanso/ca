@@ -37,8 +37,8 @@ where
     /// Creates a new Reed-Solomon code with the given evaluation points.
     ///
     /// Returns [None] if the `evaluation_points` are not distinct.
-    pub fn new_reed_solomon(k: usize, eval_points: &[F]) -> Option<Self> {
-        Self::new(Mat::vandermonde(eval_points, k).transpose())
+    pub fn new_reed_solomon(k: usize, eval_points: &[F], extended: bool) -> Option<Self> {
+        Self::new(Mat::vandermonde(eval_points, k, extended).transpose())
     }
 
     /// Creates a new cyclic code with the given generator polynomial.

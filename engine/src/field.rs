@@ -8,7 +8,8 @@ use {
         ops,
     },
     num_traits::{
-        ConstOne, ConstZero, FromPrimitive, Inv, Num, NumAssign, One, Pow, PrimInt, Zero,
+        ConstOne, ConstZero, FromPrimitive, Inv, Num, NumAssign, One, Pow, PrimInt, ToPrimitive,
+        Zero,
     },
     std::ops::Neg,
 };
@@ -36,6 +37,29 @@ where
     type UInt: 'static + Send + Sync + Copy + PrimInt + ConstZero + ConstOne + SampleUniform + FromPrimitive;
 
     const MODULUS: Self::UInt;
+
+    fn from_u64(value: u64) -> Self {
+        Self::from(Self::UInt::from_u64(value).unwrap())
+    }
+
+    fn to_u64(&self) -> u64 {
+        let uint: Self::UInt = (*self).into();
+        uint.to_u64().unwrap()
+    }
+
+    fn multiplicative_order(&self) -> usize {
+        if self == &Self::ZERO {
+            return 0;
+        }
+        let mut powers = *self;
+        for i in 1.. {
+            if powers == Self::ONE {
+                return i;
+            }
+            powers *= *self;
+        }
+        unreachable!()
+    }
 }
 
 macro_rules! impl_field {
